@@ -1,4 +1,3 @@
-#include "client_nm_comm.h"
 #include "client.h"
 #include "../common/network_utils.h"
 #include <stdio.h>

@@ -1,6 +1,4 @@
-#include "client_ss_comm.h"
 #include "client.h"
-#include "client_nm_comm.h"
 #include "../common/network_utils.h"
 #include <stdio.h>
 #include <stdlib.h>

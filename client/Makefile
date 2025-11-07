@@ -25,7 +25,6 @@ all: $(TARGET)
 # Link
 $(TARGET): $(COMMON_OBJ) $(CLIENT_OBJ)
 	$(CC) $(CFLAGS) -o $(TARGET) $(COMMON_OBJ) $(CLIENT_OBJ)
-	@echo "Client compiled successfully!"
 
 # Compile common files
 $(COMMON_DIR)/%.o: $(COMMON_DIR)/%.c
@@ -38,7 +37,6 @@ $(COMMON_DIR)/%.o: $(COMMON_DIR)/%.c
 # Clean
 clean:
 	rm -f $(CLIENT_OBJ) $(COMMON_OBJ) $(TARGET)
-	@echo "Cleaned!"
 
 # Run with default parameters (prompts for username)
 run: $(TARGET)
