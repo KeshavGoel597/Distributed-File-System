@@ -57,6 +57,31 @@ int register_with_nm(int nm_port, int client_port, const char *ss_ip) {
     
     if (ack_msg.msg_type == MSG_ACK && ack_msg.error_code == ERR_SUCCESS) {
         printf("Registration acknowledged by Name Server\n");
+        
+        // If this is a primary server, wait for backup info
+        if (server_config.is_primary) {
+            printf("Waiting for backup info from Name Server...\n");
+            
+            Message backup_info;
+            if (receive_message(nm_sockfd, &backup_info) >= 0) {
+                if (backup_info.operation == OP_NM_BACKUP_INFO) {
+                    printf("Received backup info from NM\n");
+                    printf("Backup server: %s:%d\n", backup_info.backup_ip, backup_info.backup_port);
+                    
+                    // Handle backup info (connect and bulk sync)
+                    if (handle_nm_backup_info(backup_info.backup_ip, backup_info.backup_port) < 0) {
+                        fprintf(stderr, "Warning: Failed to setup backup connection\n");
+                    } else {
+                        printf("Successfully configured backup replication\n");
+                    }
+                } else {
+                    printf("No backup info available (backup server may not be online yet)\n");
+                }
+            } else {
+                printf("No backup info received (backup server may not be online yet)\n");
+            }
+        }
+        
         close_socket(nm_sockfd);
         return 0;
     } else {
@@ -210,17 +235,20 @@ void* handle_nm_connection(void *arg) {
         case OP_NM_BACKUP_INFO: {
             printf("[NM Handler] Received backup info from NM\n");
             
-            // Extract backup server details
+            // Extract backup server details from the correct fields
             char backup_ip[MAX_IP_LEN];
             int backup_port;
-            strncpy(backup_ip, request.ip, MAX_IP_LEN - 1);
-            backup_port = request.port1;
+            strncpy(backup_ip, request.backup_ip, MAX_IP_LEN - 1);
+            backup_port = request.backup_port;
             
             printf("[NM Handler] Backup server: %s:%d\n", backup_ip, backup_port);
             
             // Handle backup info (connect and bulk sync)
             if (handle_nm_backup_info(backup_ip, backup_port) < 0) {
+                fprintf(stderr, "[NM Handler] ERROR: Failed to handle backup info\n");
                 response.error_code = ERR_CONNECTION_FAILED;
+            } else {
+                printf("[NM Handler] Successfully handled backup info\n");
             }
             break;
         }
