@@ -1,7 +1,7 @@
 # Makefile for Storage Server
 
 CC = gcc
-CFLAGS = -Wall -Wextra -g -pthread
+CFLAGS = -Wall -Wextra -Wno-format-truncation -g -pthread
 INCLUDES = -I../common
 
 # Directories
