@@ -386,7 +386,7 @@ int get_ss_info(const char *filename, char *ss_ip, int *ss_port) {
     
     // Extract SS IP and port from response
     strncpy(ss_ip, response.ip, MAX_IP_LEN - 1);
-    *ss_port = response.port2;  // Client port of SS
+    *ss_port = response.port1;  // Client port of SS (Name Server sends it in port1)
     
     close_socket(sockfd);
     return 0;

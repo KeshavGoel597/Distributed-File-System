@@ -524,3 +524,181 @@ void handle_remaccess(int socket, Message *msg) {
     
     send_message(socket, &response);
 }
+
+// Helper function to check if user has access to a file
+static int user_has_access(const char *filename, const char *username, int ss_id) {
+    // Find the storage server
+    int ss_index = find_storage_server(ss_id);
+    if (ss_index < 0) return 0;
+    
+    StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
+    
+    // Connect to storage server to check access
+    int ss_socket = connect_to_server(ss->ip, ss->nm_port);
+    if (ss_socket < 0) return 0;
+    
+    // Send INFO request to get file details
+    Message info_msg = {0};
+    info_msg.msg_type = MSG_REQUEST;
+    info_msg.operation = OP_INFO;
+    strcpy(info_msg.filename, filename);
+    strcpy(info_msg.username, username);
+    
+    if (send_message(ss_socket, &info_msg) < 0) {
+        close(ss_socket);
+        return 0;
+    }
+    
+    Message info_response = {0};
+    if (receive_message(ss_socket, &info_response) < 0) {
+        close(ss_socket);
+        return 0;
+    }
+    
+    close(ss_socket);
+    
+    // If we got SUCCESS or NO_READ_ACCESS, user is known to the file
+    // If NO_READ_ACCESS, user is in access list but doesn't have read permission
+    // We consider this as "has access" for VIEW without -a flag
+    if (info_response.error_code == ERR_SUCCESS || 
+        info_response.error_code == ERR_NO_READ_ACCESS) {
+        return 1;
+    }
+    
+    return 0;
+}
+
+// Helper function to get detailed file info from storage server
+static int get_file_details(const char *filename, int ss_id, char *details, int max_len) {
+    int ss_index = find_storage_server(ss_id);
+    if (ss_index < 0) return -1;
+    
+    StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
+    
+    int ss_socket = connect_to_server(ss->ip, ss->nm_port);
+    if (ss_socket < 0) return -1;
+    
+    // Send INFO request
+    Message info_msg = {0};
+    info_msg.msg_type = MSG_REQUEST;
+    info_msg.operation = OP_INFO;
+    strcpy(info_msg.filename, filename);
+    strcpy(info_msg.username, "system");  // Use system to get full info
+    
+    if (send_message(ss_socket, &info_msg) < 0) {
+        close(ss_socket);
+        return -1;
+    }
+    
+    Message info_response = {0};
+    if (receive_message(ss_socket, &info_response) < 0) {
+        close(ss_socket);
+        return -1;
+    }
+    
+    close(ss_socket);
+    
+    if (info_response.error_code == ERR_SUCCESS) {
+        strncpy(details, info_response.data, max_len - 1);
+        return 0;
+    }
+    
+    return -1;
+}
+
+void handle_view_files(int socket, Message *msg) {
+    printf("[File View] Client '%s' requesting file view with flags %d\n", 
+           msg->username, msg->sentence_index);
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_VIEW;
+    response.error_code = ERR_SUCCESS;
+    
+    int view_flags = msg->sentence_index;  // Flags passed in sentence_index field
+    int show_all = (view_flags == VIEW_FLAG_ALL || view_flags == VIEW_FLAG_ALL_LONG);
+    int show_long = (view_flags == VIEW_FLAG_LONG || view_flags == VIEW_FLAG_ALL_LONG);
+    
+    char file_list[MAX_DATA_SIZE] = {0};
+    int pos = 0;
+    
+    // Add header for long format
+    if (show_long) {
+        pos += snprintf(file_list + pos, MAX_DATA_SIZE - pos,
+                       "%-30s %-15s %-10s %-10s %-10s\n",
+                       "FILENAME", "OWNER", "WORDS", "CHARS", "SS");
+        pos += snprintf(file_list + pos, MAX_DATA_SIZE - pos,
+                       "%-30s %-15s %-10s %-10s %-10s\n",
+                       "--------", "-----", "-----", "-----", "--");
+    }
+    
+    pthread_mutex_lock(&nm_state->ss_list_mutex);
+    
+    for (int i = 0; i < nm_state->ss_count; i++) {
+        StorageServerInfo *ss = &nm_state->storage_servers[i];
+        
+        pthread_mutex_lock(&ss->ss_mutex);
+        for (int j = 0; j < ss->file_count; j++) {
+            FileInfo *file = &ss->files[j];
+            
+            // Check access permission if not showing all files
+            if (!show_all) {
+                // Check if user is owner
+                if (strcmp(file->owner, msg->username) != 0) {
+                    // Not owner, need to check access list
+                    if (!user_has_access(file->filename, msg->username, file->primary_ss_id)) {
+                        continue;  // Skip this file
+                    }
+                }
+            }
+            
+            int written;
+            if (show_long) {
+                // Get detailed info from storage server
+                char details[512] = {0};
+                if (get_file_details(file->filename, file->primary_ss_id, details, sizeof(details)) == 0) {
+                    // Parse details: "File: <name>\nOwner: <owner>\n...\nWords: <count>\nCharacters: <count>\n..."
+                    int words = 0, chars = 0;
+                    // Parse the multi-line response
+                    char *words_line = strstr(details, "Words: ");
+                    char *chars_line = strstr(details, "Characters: ");
+                    if (words_line) sscanf(words_line, "Words: %d", &words);
+                    if (chars_line) sscanf(chars_line, "Characters: %d", &chars);
+                    
+                    written = snprintf(file_list + pos, MAX_DATA_SIZE - pos,
+                                      "%-30s %-15s %-10d %-10d SS%-8d\n",
+                                      file->filename, file->owner, words, chars, file->primary_ss_id);
+                } else {
+                    // Fallback if can't get details
+                    written = snprintf(file_list + pos, MAX_DATA_SIZE - pos,
+                                      "%-30s %-15s %-10s %-10s SS%-8d\n",
+                                      file->filename, file->owner, "N/A", "N/A", file->primary_ss_id);
+                }
+            } else {
+                // Simple format: just filename
+                written = snprintf(file_list + pos, MAX_DATA_SIZE - pos,
+                                  "%s\n", file->filename);
+            }
+            
+            if (written > 0 && pos + written < MAX_DATA_SIZE) {
+                pos += written;
+            } else {
+                pthread_mutex_unlock(&ss->ss_mutex);
+                goto buffer_full;
+            }
+        }
+        pthread_mutex_unlock(&ss->ss_mutex);
+    }
+    
+buffer_full:
+    pthread_mutex_unlock(&nm_state->ss_list_mutex);
+    
+    if (pos == 0 || (show_long && pos <= 122)) {  // Only header
+        strcpy(response.data, "No files found");
+    } else {
+        strcpy(response.data, file_list);
+    }
+    
+    printf("[File View] Sent file view to client '%s' (%d bytes)\n", msg->username, pos);
+    send_message(socket, &response);
+}

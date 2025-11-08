@@ -570,21 +570,30 @@ int lock_sentence_ll(const char *filename, int sentence_index, const char *usern
         return ERR_SENTENCE_OUT_OF_RANGE;
     }
     
-    // Try to lock (non-blocking)
-    if (pthread_mutex_trylock(&sent->sentence_lock) != 0) {
-        // Already locked
+    // Check if already locked by someone
+    if (sent->is_locked) {
+        // If locked by the same user, allow re-lock (idempotent)
+        if (strcmp(sent->locked_by, username) == 0) {
+            printf("Sentence %d in '%s' already locked by '%s' (re-lock allowed)\n", 
+                   sentence_index, filename, username);
+            return 0;
+        }
+        // Locked by different user
+        printf("Sentence %d in '%s' locked by '%s', requested by '%s'\n", 
+               sentence_index, filename, sent->locked_by, username);
         return ERR_SENTENCE_LOCKED;
     }
     
-    // Check if already locked by someone
-    if (sent->is_locked) {
-        pthread_mutex_unlock(&sent->sentence_lock);
+    // Try to lock (non-blocking)
+    if (pthread_mutex_trylock(&sent->sentence_lock) != 0) {
+        // Someone else just acquired the lock
         return ERR_SENTENCE_LOCKED;
     }
     
     // Acquire lock
     sent->is_locked = 1;
     strncpy(sent->locked_by, username, MAX_USERNAME - 1);
+    sent->locked_by[MAX_USERNAME - 1] = '\0';
     
     printf("Sentence %d in '%s' locked by '%s'\n", sentence_index, filename, username);
     return 0;
@@ -621,6 +630,32 @@ int unlock_sentence_ll(const char *filename, int sentence_index, const char *use
     pthread_mutex_unlock(&sent->sentence_lock);
     
     printf("Sentence %d in '%s' unlocked by '%s'\n", sentence_index, filename, username);
+    return 0;
+}
+
+// Force unlock all sentences in a file (for cleanup/debugging)
+int force_unlock_all_sentences_ll(const char *filename) {
+    LoadedFile *file = get_file_from_cache(filename);
+    if (file == NULL) {
+        return ERR_FILE_NOT_FOUND;
+    }
+    
+    SentenceNode *sent = file->sentences_head;
+    int unlocked_count = 0;
+    
+    while (sent != NULL) {
+        if (sent->is_locked) {
+            sent->is_locked = 0;
+            memset(sent->locked_by, 0, sizeof(sent->locked_by));
+            // Try to unlock the mutex - may fail if not locked, ignore error
+            pthread_mutex_trylock(&sent->sentence_lock);  // Acquire if not held
+            pthread_mutex_unlock(&sent->sentence_lock);   // Release it
+            unlocked_count++;
+        }
+        sent = sent->next;
+    }
+    
+    printf("Force unlocked %d sentences in '%s'\n", unlocked_count, filename);
     return 0;
 }
 

@@ -121,7 +121,7 @@ void handle_storage_server_registration(int socket, Message *msg) {
                 backup_info.operation = OP_NM_BACKUP_INFO;
                 backup_info.ss_id = backup_ss_id;
                 strcpy(backup_info.backup_ip, backup_ss->ip);
-                backup_info.backup_port = backup_ss->client_port;  // Use client port for replication
+                backup_info.backup_port = backup_ss->nm_port;  // Use nm_port for replication (backup listens on nm_port)
                 
                 send_message(socket, &backup_info);
                 

@@ -74,6 +74,9 @@ int lock_sentence_ll(const char *filename, int sentence_index, const char *usern
 // Unlock a sentence
 int unlock_sentence_ll(const char *filename, int sentence_index, const char *username);
 
+// Force unlock all sentences in a file (for cleanup/debugging)
+int force_unlock_all_sentences_ll(const char *filename);
+
 // Save in-memory linked list to disk (via swap file)
 int sync_file_to_disk(const char *filename);
 

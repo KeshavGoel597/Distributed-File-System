@@ -63,6 +63,14 @@ int lock_sentence(const char *filename, int sentence_index, const char *username
     pthread_mutex_lock(&sent_lock->lock);
     
     if (sent_lock->is_locked) {
+        // Check if it's locked by the same user (allow re-locking)
+        if (strcmp(sent_lock->locked_by, username) == 0) {
+            pthread_mutex_unlock(&sent_lock->lock);
+            printf("Sentence %d in file '%s' already locked by user '%s' (re-acquiring)\n", 
+                   sentence_index, filename, username);
+            return 0;  // Success - user already has the lock
+        }
+        
         pthread_mutex_unlock(&sent_lock->lock);
         fprintf(stderr, "Sentence %d in file '%s' is already locked by '%s'\n", 
                 sentence_index, filename, sent_lock->locked_by);
