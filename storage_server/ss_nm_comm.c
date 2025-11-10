@@ -102,13 +102,17 @@ void* handle_nm_connection(void *arg) {
     printf("[NM Handler] Processing request from %s\n", client_ip);
     
     Message request;
+    memset(&request, 0, sizeof(Message));
     if (receive_message(nm_sockfd, &request) < 0) {
         fprintf(stderr, "[NM Handler] Failed to receive message\n");
         close_socket(nm_sockfd);
         return NULL;
     }
     
-    printf("[NM Handler] Received operation: %d\n", request.operation);
+    printf("[NM Handler] Received operation: %d (msg_type=%d, error_code=%d)\n", 
+           request.operation, request.msg_type, request.error_code);
+    printf("[NM Handler] Message details: username=%s, filename=%s, data=%s\n",
+           request.username, request.filename, request.data);
     
     Message response;
     memset(&response, 0, sizeof(Message));
@@ -189,21 +193,26 @@ void* handle_nm_connection(void *arg) {
         }
         
         case OP_SS_ADDACCESS: {
-            printf("[NM Handler] ADDACCESS request: %s for user %s\n", 
-                   request.filename, request.username);
+            printf("[NM Handler] ADDACCESS request: %s for user %s (requested by %s)\n", 
+                   request.filename, request.data, request.username);
             
-            // Parse access type from data field
-            int access_type = ACCESS_READ; // Default
-            if (strstr(request.data, "RW") || strstr(request.data, "READWRITE")) {
-                access_type = ACCESS_READ_WRITE;
-            } else if (strstr(request.data, "W") || strstr(request.data, "WRITE")) {
-                access_type = ACCESS_WRITE;
-            }
+            // Parse access type from data field - wait, access_type should be in sentence_index
+            // and target username should be in data field
+            int access_type = request.sentence_index;  // Access type passed in sentence_index
             
-            int result = add_user_access_ll(request.filename, request.username, access_type);
+            // Extract target username from data field
+            char target_user[MAX_USERNAME];
+            strncpy(target_user, request.data, MAX_USERNAME - 1);
+            target_user[MAX_USERNAME - 1] = '\0';
+            
+            int result = add_user_access_ll(request.filename, target_user, access_type);
             if (result < 0) {
                 response.error_code = ERR_SERVER_ERROR;
+                snprintf(response.data, MAX_DATA_SIZE, "Failed to add access for user");
             } else {
+                response.error_code = ERR_SUCCESS;
+                snprintf(response.data, MAX_DATA_SIZE, "Access granted successfully");
+                
                 // Replicate metadata to backup
                 if (server_config.is_primary) {
                     if (replicate_metadata() < 0) {
@@ -215,13 +224,22 @@ void* handle_nm_connection(void *arg) {
         }
         
         case OP_SS_REMACCESS: {
-            printf("[NM Handler] REMACCESS request: %s for user %s\n", 
-                   request.filename, request.username);
+            printf("[NM Handler] REMACCESS request: %s for user %s (requested by %s)\n", 
+                   request.filename, request.data, request.username);
             
-            int result = remove_user_access_ll(request.filename, request.username);
+            // Extract target username from data field
+            char target_user[MAX_USERNAME];
+            strncpy(target_user, request.data, MAX_USERNAME - 1);
+            target_user[MAX_USERNAME - 1] = '\0';
+            
+            int result = remove_user_access_ll(request.filename, target_user);
             if (result < 0) {
                 response.error_code = ERR_SERVER_ERROR;
+                snprintf(response.data, MAX_DATA_SIZE, "Failed to remove access for user");
             } else {
+                response.error_code = ERR_SUCCESS;
+                snprintf(response.data, MAX_DATA_SIZE, "Access removed successfully");
+                
                 // Replicate metadata to backup
                 if (server_config.is_primary) {
                     if (replicate_metadata() < 0) {

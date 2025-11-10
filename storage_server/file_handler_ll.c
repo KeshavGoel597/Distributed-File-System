@@ -271,6 +271,17 @@ LoadedFile* load_file_into_memory(const char *filename) {
     SentenceNode *sentences = parse_file_to_linked_list(content);
     free(content);
     
+    // If file is empty, create one empty sentence for editing
+    if (sentences == NULL) {
+        sentences = create_sentence_node('\0');
+        if (sentences == NULL) {
+            return NULL;
+        }
+        // Create one empty word in the sentence
+        sentences->words_head = create_word_node("");
+        printf("Created initial empty sentence for empty file '%s'\n", filename);
+    }
+    
     // Create LoadedFile structure
     LoadedFile *loaded = (LoadedFile*)malloc(sizeof(LoadedFile));
     if (loaded == NULL) {
@@ -508,16 +519,9 @@ int read_file_ll(const char *filename, char *content, int max_size) {
 // Helper function to write linked list to file
 static int write_linked_list_to_file(FILE *fp, SentenceNode *sentences_head) {
     SentenceNode *sent = sentences_head;
-    int first_sentence = 1;
     
     while (sent != NULL) {
-        // Add space between sentences
-        if (!first_sentence) {
-            fprintf(fp, " ");
-        }
-        first_sentence = 0;
-        
-        // Write words
+        // Write words in this sentence
         WordNode *word = sent->words_head;
         int first_word = 1;
         while (word != NULL) {
@@ -527,6 +531,12 @@ static int write_linked_list_to_file(FILE *fp, SentenceNode *sentences_head) {
             first_word = 0;
             fprintf(fp, "%s", word->word);
             word = word->next;
+        }
+        
+        // Add space after this sentence if there's a next sentence
+        // This ensures sentences are separated when read back
+        if (sent->next != NULL) {
+            fprintf(fp, " ");
         }
         
         sent = sent->next;
@@ -573,7 +583,7 @@ int sync_file_to_disk(const char *filename) {
     return 0;
 }
 
-// Lock a sentence
+// Lock a sentence (NEW VERSION)
 int lock_sentence_ll(const char *filename, int sentence_index, const char *username) {
     LoadedFile *file = get_file_from_cache(filename);
     if (file == NULL) {
@@ -592,52 +602,36 @@ int lock_sentence_ll(const char *filename, int sentence_index, const char *usern
     if (sent == NULL) {
         return ERR_SENTENCE_OUT_OF_RANGE;
     }
-    
-    // Check if already locked by someone
-    if (sent->is_locked) {
-        // If locked by the same user, allow re-lock (idempotent)
-        if (strcmp(sent->locked_by, username) == 0) {
-            printf("Sentence %d in '%s' already locked by '%s' (re-lock allowed)\n", 
-                   sentence_index, filename, username);
-            return 0;
-        }
-        // Locked by different user - try to clean up stale locks
-        printf("Sentence %d in '%s' appears locked by '%s', requested by '%s'\n", 
-               sentence_index, filename, sent->locked_by, username);
-        
-        // Try to acquire the mutex to check if it's truly locked
-        int trylock_result = pthread_mutex_trylock(&sent->sentence_lock);
-        if (trylock_result == 0) {
-            // We got the lock! Previous lock was stale (client disconnected)
-            printf("[Lock Cleanup] Stale lock detected, cleaning up and granting to '%s'\n", username);
-            sent->is_locked = 1;
-            strncpy(sent->locked_by, username, MAX_USERNAME - 1);
-            sent->locked_by[MAX_USERNAME - 1] = '\0';
-            printf("Sentence %d in '%s' locked by '%s' (after cleanup)\n", sentence_index, filename, username);
-            return 0;
-        } else {
-            // Truly locked by another active connection
-            printf("[Lock] Sentence is actively locked, access denied\n");
-            return ERR_SENTENCE_LOCKED;
-        }
-    }
-    
-    // Try to lock (non-blocking)
-    if (pthread_mutex_trylock(&sent->sentence_lock) != 0) {
-        // Someone else just acquired the lock
-        return ERR_SENTENCE_LOCKED;
-    }
-    
-    // Acquire lock
-    sent->is_locked = 1;
-    strncpy(sent->locked_by, username, MAX_USERNAME - 1);
-    sent->locked_by[MAX_USERNAME - 1] = '\0';
-    
-    printf("Sentence %d in '%s' locked by '%s'\n", sentence_index, filename, username);
-    return 0;
-}
 
-// Unlock a sentence
+    int result = ERR_SENTENCE_LOCKED; // Default to locked
+
+    // Lock the mutex to make our check atomic
+    pthread_mutex_lock(&sent->sentence_lock);
+
+    if (!sent->is_locked) {
+        // --- Success case ---
+        // Sentence is free, so we'll lock it.
+        sent->is_locked = 1;
+        strncpy(sent->locked_by, username, MAX_USERNAME - 1);
+        sent->locked_by[MAX_USERNAME - 1] = '\0';
+        result = 0; // Success
+        printf("Lock SUCCESS: Sentence %d in '%s' locked by '%s'\n", 
+               sentence_index, filename, username);
+    } else {
+        // --- Failure case ---
+        // Sentence is already locked by someone (maybe even us, in a stale state)
+        // We deny the lock.
+        printf("Lock FAILED: Sentence %d in '%s' is already locked by '%s'. Request from '%s' denied.\n", 
+               sentence_index, filename, sent->locked_by, username);
+        result = ERR_SENTENCE_LOCKED;
+    }
+
+    // Unlock the mutex
+    pthread_mutex_unlock(&sent->sentence_lock);
+    
+    return result;
+}
+// Unlock a sentence (NEW VERSION)
 int unlock_sentence_ll(const char *filename, int sentence_index, const char *username) {
     LoadedFile *file = get_file_from_cache(filename);
     if (file == NULL) {
@@ -654,27 +648,32 @@ int unlock_sentence_ll(const char *filename, int sentence_index, const char *use
     }
     
     if (sent == NULL) {
-        return -1;
+        return -1; // Sentence not found
     }
-    
-    // Check if locked by this user (or if it's a stale lock, allow cleanup)
+
+    // Lock the mutex to make our check atomic
+    pthread_mutex_lock(&sent->sentence_lock);
+
     if (!sent->is_locked) {
-        printf("Sentence %d in '%s' was not locked\n", sentence_index, filename);
-        return 0;  // Already unlocked, return success
-    }
-    
-    if (strcmp(sent->locked_by, username) != 0) {
-        printf("Warning: Sentence %d in '%s' locked by '%s' but unlock requested by '%s'\n",
+        // Sentence is already unlocked. Do nothing.
+        printf("Unlock INFO: Sentence %d in '%s' was already unlocked.\n", 
+               sentence_index, filename);
+    } else if (strcmp(sent->locked_by, username) != 0) {
+        // Wrong user is trying to unlock. Do not allow.
+        printf("Unlock FAILED: Sentence %d in '%s' is locked by '%s', cannot be unlocked by '%s'.\n", 
                sentence_index, filename, sent->locked_by, username);
-        // Allow unlock anyway for cleanup purposes
+    } else {
+        // --- Success case ---
+        // Sentence is locked AND the username matches. Unlock it.
+        sent->is_locked = 0;
+        memset(sent->locked_by, 0, sizeof(sent->locked_by));
+        printf("Unlock SUCCESS: Sentence %d in '%s' unlocked by '%s'.\n", 
+               sentence_index, filename, username);
     }
-    
-    // Release lock
-    sent->is_locked = 0;
-    memset(sent->locked_by, 0, sizeof(sent->locked_by));
+
+    // Unlock the mutex
     pthread_mutex_unlock(&sent->sentence_lock);
     
-    printf("Sentence %d in '%s' unlocked by '%s'\n", sentence_index, filename, username);
     return 0;
 }
 
@@ -823,7 +822,10 @@ int get_file_list_ll(char *file_list, int max_size) {
         if (i > 0) {
             strncat(file_list, ",", max_size - strlen(file_list) - 1);
         }
+        // Format: filename:owner
         strncat(file_list, metadata_list[i].filename, max_size - strlen(file_list) - 1);
+        strncat(file_list, ":", max_size - strlen(file_list) - 1);
+        strncat(file_list, metadata_list[i].owner, max_size - strlen(file_list) - 1);
     }
     pthread_mutex_unlock(&metadata_mutex);
     

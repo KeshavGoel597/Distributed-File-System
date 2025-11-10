@@ -58,15 +58,25 @@ int register_storage_server(Message *msg) {
             char *filename = strtok(file_list, ",");
             
             while (filename != NULL && ss->file_count < MAX_FILES_PER_SERVER) {
+                // Parse filename:owner format
+                char *colon = strchr(filename, ':');
+                char owner[MAX_USERNAME] = "system";  // Default owner
+                
+                if (colon != NULL) {
+                    *colon = '\0';  // Split at colon
+                    strncpy(owner, colon + 1, MAX_USERNAME - 1);
+                    owner[MAX_USERNAME - 1] = '\0';
+                }
+                
                 strcpy(ss->files[ss->file_count].filename, filename);
-                strcpy(ss->files[ss->file_count].owner, "system");  // Default owner
+                strcpy(ss->files[ss->file_count].owner, owner);
                 ss->files[ss->file_count].primary_ss_id = msg->ss_id;
                 ss->files[ss->file_count].backup_ss_id = 0;  // Will be set during pairing
                 ss->files[ss->file_count].created_time = time(NULL);
                 ss->files[ss->file_count].modified_time = time(NULL);
                 ss->file_count++;
                 
-                printf("[SS Registration] Registered file: %s\n", filename);
+                printf("[SS Registration] Registered file: %s (owner: %s)\n", filename, owner);
                 filename = strtok(NULL, ",");
             }
             

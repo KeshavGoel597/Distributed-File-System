@@ -149,3 +149,54 @@ void cleanup_lock_manager() {
     pthread_mutex_destroy(&lock_array_mutex);
     printf("Lock manager cleaned up\n");
 }
+
+// Force unlock a specific sentence (for manual recovery)
+int force_unlock_sentence(const char *filename, int sentence_index) {
+    pthread_mutex_lock(&lock_array_mutex);
+    
+    for (int i = 0; i < lock_count; i++) {
+        if (strcmp(locks[i].filename, filename) == 0 && 
+            locks[i].sentence_index == sentence_index) {
+            pthread_mutex_lock(&locks[i].lock);
+            locks[i].is_locked = 0;
+            char old_user[64];
+            strncpy(old_user, locks[i].locked_by, sizeof(old_user) - 1);
+            memset(locks[i].locked_by, 0, sizeof(locks[i].locked_by));
+            pthread_mutex_unlock(&locks[i].lock);
+            pthread_mutex_unlock(&lock_array_mutex);
+            printf("Force unlocked sentence %d in file '%s' (was locked by '%s')\n", 
+                   sentence_index, filename, old_user);
+            return 0;
+        }
+    }
+    
+    pthread_mutex_unlock(&lock_array_mutex);
+    fprintf(stderr, "Sentence %d in file '%s' not found in lock table\n", 
+            sentence_index, filename);
+    return -1;
+}
+
+// Unlock all locks held by a specific user
+int unlock_all_by_user(const char *username) {
+    int unlocked_count = 0;
+    pthread_mutex_lock(&lock_array_mutex);
+    
+    for (int i = 0; i < lock_count; i++) {
+        pthread_mutex_lock(&locks[i].lock);
+        if (locks[i].is_locked && strcmp(locks[i].locked_by, username) == 0) {
+            locks[i].is_locked = 0;
+            printf("Force unlocked sentence %d in file '%s' (user: '%s')\n", 
+                   locks[i].sentence_index, locks[i].filename, username);
+            memset(locks[i].locked_by, 0, sizeof(locks[i].locked_by));
+            unlocked_count++;
+        }
+        pthread_mutex_unlock(&locks[i].lock);
+    }
+    
+    pthread_mutex_unlock(&lock_array_mutex);
+    
+    if (unlocked_count > 0) {
+        printf("Force unlocked %d sentence(s) for user '%s'\n", unlocked_count, username);
+    }
+    return unlocked_count;
+}

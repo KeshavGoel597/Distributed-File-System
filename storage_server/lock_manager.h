@@ -31,4 +31,10 @@ int is_sentence_locked(const char *filename, int sentence_index);
 // Cleanup lock manager
 void cleanup_lock_manager();
 
+// Force unlock a specific sentence (for manual recovery)
+int force_unlock_sentence(const char *filename, int sentence_index);
+
+// Unlock all locks held by a specific user
+int unlock_all_by_user(const char *username);
+
 #endif // LOCK_MANAGER_H

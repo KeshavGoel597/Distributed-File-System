@@ -12,6 +12,9 @@
 // Global state
 NameServerState *nm_state = NULL;
 
+// Global flag to control server running state
+volatile sig_atomic_t server_running = 1;
+
 int init_name_server() {
     printf("=== Name Server Initialization ===\n");
     
@@ -111,11 +114,12 @@ void start_name_server() {
     print_server_status();
     
     // Main accept loop
-    while (nm_state->running) {
+    while (server_running) {
         char client_ip[MAX_IP_LEN];
         int client_socket = accept_connection(nm_state->server_socket, client_ip);
         
         if (client_socket < 0) {
+            if (!server_running) break;  // Exit gracefully if shutting down
             if (nm_state->running) {
                 printf("Error accepting connection: %s\n", strerror(errno));
             }
@@ -212,11 +216,15 @@ void handle_connection(void *arg) {
             break;
             
         case OP_ADDACCESS:
+            printf("[DEBUG] Routing to handle_addaccess\n");
             handle_addaccess(socket, &msg);
+            printf("[DEBUG] handle_addaccess completed\n");
             break;
             
         case OP_REMACCESS:
+            printf("[DEBUG] Routing to handle_remaccess\n");
             handle_remaccess(socket, &msg);
+            printf("[DEBUG] handle_remaccess completed\n");
             break;
             
         case OP_LIST:
@@ -241,6 +249,14 @@ void handle_connection(void *arg) {
 // Signal handler for graceful shutdown
 void signal_handler(int sig) {
     printf("\nReceived signal %d, shutting down...\n", sig);
+    server_running = 0;
+    
+    // Close listening socket to unblock accept() call
+    if (nm_state && nm_state->server_socket >= 0) {
+        shutdown(nm_state->server_socket, SHUT_RDWR);
+    }
+    
+    sleep(1);
     stop_name_server();
 }
 

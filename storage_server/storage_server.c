@@ -15,6 +15,9 @@
 // Global server configuration
 SSConfig server_config;
 
+// Global flag to control server running state
+volatile sig_atomic_t server_running = 1;
+
 // Initialize storage server
 int init_storage_server(int nm_port, int client_port, const char *storage_dir) {
     server_config.nm_port = nm_port;
@@ -106,19 +109,22 @@ int start_server() {
         fprintf(stderr, "Failed to create NM handler thread\n");
         return -1;
     }
+    pthread_detach(nm_thread);  // Detach so we don't need to join
     
     // Thread for handling client connections
     if (pthread_create(&client_thread, NULL, handle_client_connections, NULL) != 0) {
         fprintf(stderr, "Failed to create client handler thread\n");
         return -1;
     }
+    pthread_detach(client_thread);  // Detach so we don't need to join
     
     printf("\n=== Storage Server is running ===\n");
     printf("Press Ctrl+C to shutdown\n\n");
     
-    // Wait for threads
-    pthread_join(nm_thread, NULL);
-    pthread_join(client_thread, NULL);
+    // Keep main thread alive until shutdown signal
+    while (server_running) {
+        sleep(1);
+    }
     
     return 0;
 }
@@ -126,11 +132,12 @@ int start_server() {
 // Handle Name Server connections
 void* handle_nm_connections(void *arg) {
     (void)arg; // Suppress unused parameter warning
-    while (1) {
+    while (server_running) {
         char client_ip[MAX_IP_LEN];
         int nm_conn = accept_connection(server_config.nm_sockfd, client_ip);
         
         if (nm_conn < 0) {
+            if (!server_running) break;  // Exit gracefully if shutting down
             fprintf(stderr, "Failed to accept NM connection\n");
             continue;
         }
@@ -158,11 +165,12 @@ void* handle_nm_connections(void *arg) {
 // Handle Client connections
 void* handle_client_connections(void *arg) {
     (void)arg; // Suppress unused parameter warning
-    while (1) {
+    while (server_running) {
         char client_ip[MAX_IP_LEN];
         int client_conn = accept_connection(server_config.client_sockfd, client_ip);
         
         if (client_conn < 0) {
+            if (!server_running) break;  // Exit gracefully if shutting down
             fprintf(stderr, "Failed to accept client connection\n");
             continue;
         }
@@ -194,12 +202,14 @@ void shutdown_server() {
     // Save metadata before shutdown
     save_metadata_ll();
     
-    // Close sockets
+    // Close sockets (if not already closed by signal handler)
     if (server_config.nm_sockfd >= 0) {
         close_socket(server_config.nm_sockfd);
+        server_config.nm_sockfd = -1;
     }
     if (server_config.client_sockfd >= 0) {
         close_socket(server_config.client_sockfd);
+        server_config.client_sockfd = -1;
     }
     
     // Cleanup backup handler
@@ -214,8 +224,21 @@ void shutdown_server() {
 // Signal handler for graceful shutdown
 void signal_handler(int signum) {
     printf("\nReceived signal %d\n", signum);
-    shutdown_server();
-    exit(0);
+    server_running = 0; // Set flag to stop server loops
+    
+    // Close listening sockets to unblock accept() calls
+    if (server_config.nm_sockfd >= 0) {
+        shutdown(server_config.nm_sockfd, SHUT_RDWR);
+        close(server_config.nm_sockfd);
+        server_config.nm_sockfd = -1;
+    }
+    if (server_config.client_sockfd >= 0) {
+        shutdown(server_config.client_sockfd, SHUT_RDWR);
+        close(server_config.client_sockfd);
+        server_config.client_sockfd = -1;
+    }
+    
+    // Shutdown will be handled by main thread after waking from sleep loop
 }
 
 int main(int argc, char *argv[]) {
@@ -254,6 +277,9 @@ int main(int argc, char *argv[]) {
         shutdown_server();
         return 1;
     }
+    
+    // Server has stopped (signal received), perform cleanup
+    shutdown_server();
     
     return 0;
 }

@@ -149,9 +149,9 @@ int handle_write_request(int client_sockfd, Message *msg) {
     // Try to lock the sentence
     int lock_result = lock_sentence_ll(msg->filename, msg->sentence_index, msg->username);
     if (lock_result != 0) {
-        printf("[WRITE] Sentence is locked\n");
+        printf("[WRITE] Failed to lock sentence: error code %d\n", lock_result);
         response.msg_type = MSG_ERROR;
-        response.error_code = ERR_SENTENCE_LOCKED;
+        response.error_code = lock_result;  // Return the actual error code
         send_message(client_sockfd, &response);
         return -1;
     }
@@ -166,17 +166,18 @@ int handle_write_request(int client_sockfd, Message *msg) {
     save_undo_backup_ll(msg->filename);
     
     // Receive write commands until ETIRW
+    int write_completed = 0;
     while (1) {
         Message write_cmd;
         if (receive_message(client_sockfd, &write_cmd) <= 0) {
-            fprintf(stderr, "[WRITE] Failed to receive write command\n");
-            unlock_sentence_ll(msg->filename, msg->sentence_index, msg->username);
-            return -1;
+            fprintf(stderr, "[WRITE] Failed to receive write command (client disconnected)\n");
+            break;
         }
         
         // Check for end of write (ETIRW)
         if (strcmp(write_cmd.data, "ETIRW") == 0) {
             printf("[WRITE] Received ETIRW, completing write operation\n");
+            write_completed = 1;
             break;
         }
         
@@ -205,8 +206,16 @@ int handle_write_request(int client_sockfd, Message *msg) {
         send_message(client_sockfd, &write_response);
     }
     
-    // Unlock the sentence
+    // Always unlock the sentence, even if write didn't complete
     unlock_sentence_ll(msg->filename, msg->sentence_index, msg->username);
+    printf("[WRITE] Unlocked sentence %d in file '%s' for user '%s'\n", 
+           msg->sentence_index, msg->filename, msg->username);
+    
+    // If write didn't complete properly, return error
+    if (!write_completed) {
+        fprintf(stderr, "[WRITE] Write operation incomplete - lock released\n");
+        return -1;
+    }
     
     // Replicate changes to backup server if this is a primary server
     if (server_config.is_primary) {

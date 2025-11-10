@@ -300,6 +300,7 @@ void handle_delete_file(int socket, Message *msg) {
     response.operation = OP_DELETE;
     
     if (!file) {
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_FILE_NOT_FOUND;
         strcpy(response.data, "File not found");
         printf("[File Deletion] File '%s' not found\n", msg->filename);
@@ -308,13 +309,18 @@ void handle_delete_file(int socket, Message *msg) {
     }
     
     // Check if user is the owner (simple ownership check)
+    printf("[File Deletion] Checking ownership: file owner='%s', requesting user='%s'\n", 
+           file->owner, msg->username);
     if (strcmp(file->owner, msg->username) != 0) {
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_NOT_OWNER;
         strcpy(response.data, "Only file owner can delete the file");
-        printf("[File Deletion] User '%s' is not owner of file '%s'\n", msg->username, msg->filename);
+        printf("[File Deletion] User '%s' is not owner of file '%s' (owner is '%s')\n", 
+               msg->username, msg->filename, file->owner);
         send_message(socket, &response);
         return;
     }
+    printf("[File Deletion] Ownership check passed\n");
     
     // Send delete command to storage server
     int primary_ss_id = file->primary_ss_id;
@@ -323,6 +329,7 @@ void handle_delete_file(int socket, Message *msg) {
     
     int ss_socket = connect_to_server(ss->ip, ss->nm_port);
     if (ss_socket < 0) {
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to connect to storage server");
         printf("[File Deletion] Failed to connect to SS%d\n", primary_ss_id);
@@ -339,6 +346,7 @@ void handle_delete_file(int socket, Message *msg) {
     strcpy(ss_msg.data, "DELETE command from Name Server");
     
     if (send_message(ss_socket, &ss_msg) < 0) {
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to send command to storage server");
         printf("[File Deletion] Failed to send DELETE command to SS%d\n", primary_ss_id);
@@ -350,6 +358,7 @@ void handle_delete_file(int socket, Message *msg) {
     // Receive response from storage server
     Message ss_response = {0};
     if (receive_message(ss_socket, &ss_response) < 0) {
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to receive response from storage server");
         printf("[File Deletion] Failed to receive response from SS%d\n", primary_ss_id);
@@ -419,6 +428,8 @@ void handle_list_files(int socket, Message *msg) {
 void handle_addaccess(int socket, Message *msg) {
     printf("[Access Control] Adding access for user '%s' to file '%s'\n", 
            msg->data, msg->filename);  // username to add is in data field
+    printf("[DEBUG] handle_addaccess: username=%s, filename=%s, target_user=%s, access_type=%d\n",
+           msg->username, msg->filename, msg->data, msg->sentence_index);
     
     FileInfo *file = find_file(msg->filename);
     
@@ -427,6 +438,7 @@ void handle_addaccess(int socket, Message *msg) {
     response.operation = OP_ADDACCESS;
     
     if (!file) {
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_FILE_NOT_FOUND;
         strcpy(response.data, "File not found");
         send_message(socket, &response);
@@ -435,6 +447,7 @@ void handle_addaccess(int socket, Message *msg) {
     
     // Check if requesting user is the owner
     if (strcmp(file->owner, msg->username) != 0) {
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_NOT_OWNER;
         strcpy(response.data, "Only file owner can modify access permissions");
         send_message(socket, &response);
@@ -446,34 +459,66 @@ void handle_addaccess(int socket, Message *msg) {
     int ss_index = find_storage_server(primary_ss_id);
     StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
     
+    printf("[DEBUG] Connecting to storage server: %s:%d (ss_id=%d)\n", 
+           ss->ip, ss->nm_port, primary_ss_id);
     int ss_socket = connect_to_server(ss->ip, ss->nm_port);
     if (ss_socket < 0) {
+        printf("[DEBUG] Failed to connect to storage server!\n");
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to connect to storage server");
         send_message(socket, &response);
         return;
     }
     
+    printf("[DEBUG] Successfully connected to storage server on socket %d\n", ss_socket);
+    
     // Send addaccess command to storage server
     Message ss_msg = *msg;  // Copy original message
     ss_msg.operation = OP_SS_ADDACCESS;
     
-    send_message(ss_socket, &ss_msg);
+    printf("[DEBUG] Prepared message for SS: operation=%d (should be %d)\n", 
+           ss_msg.operation, OP_SS_ADDACCESS);
+    printf("[DEBUG] Message details: msg_type=%d, username=%s, filename=%s, data=%s, sentence_index=%d\n",
+           ss_msg.msg_type, ss_msg.username, ss_msg.filename, ss_msg.data, ss_msg.sentence_index);
+    printf("[DEBUG] Sending OP_SS_ADDACCESS to storage server\n");
     
+    if (send_message(ss_socket, &ss_msg) < 0) {
+        printf("[DEBUG] Failed to send message to storage server\n");
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_CONNECTION_FAILED;
+        strcpy(response.data, "Failed to send to storage server");
+        close(ss_socket);
+        send_message(socket, &response);
+        return;
+    }
+    
+    printf("[DEBUG] Message sent successfully to storage server\n");
+    
+    printf("[DEBUG] Waiting for response from storage server...\n");
     Message ss_response = {0};
     receive_message(ss_socket, &ss_response);
+    printf("[DEBUG] Received response from storage server: error_code=%d, data=%s\n",
+           ss_response.error_code, ss_response.data);
     close(ss_socket);
     
     // Forward response to client
+    if (ss_response.error_code != ERR_SUCCESS) {
+        response.msg_type = MSG_ERROR;
+    }
     response.error_code = ss_response.error_code;
     strcpy(response.data, ss_response.data);
     
+    printf("[DEBUG] Sending response to client: msg_type=%d, error_code=%d\n",
+           response.msg_type, response.error_code);
     send_message(socket, &response);
 }
 
 void handle_remaccess(int socket, Message *msg) {
     printf("[Access Control] Removing access for user '%s' from file '%s'\n", 
            msg->data, msg->filename);  // username to remove is in data field
+    printf("[DEBUG] handle_remaccess: username=%s, filename=%s, target_user=%s\n",
+           msg->username, msg->filename, msg->data);
     
     FileInfo *file = find_file(msg->filename);
     
@@ -482,6 +527,7 @@ void handle_remaccess(int socket, Message *msg) {
     response.operation = OP_REMACCESS;
     
     if (!file) {
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_FILE_NOT_FOUND;
         strcpy(response.data, "File not found");
         send_message(socket, &response);
@@ -490,6 +536,7 @@ void handle_remaccess(int socket, Message *msg) {
     
     // Check if requesting user is the owner
     if (strcmp(file->owner, msg->username) != 0) {
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_NOT_OWNER;
         strcpy(response.data, "Only file owner can modify access permissions");
         send_message(socket, &response);
@@ -503,6 +550,7 @@ void handle_remaccess(int socket, Message *msg) {
     
     int ss_socket = connect_to_server(ss->ip, ss->nm_port);
     if (ss_socket < 0) {
+        response.msg_type = MSG_ERROR;
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to connect to storage server");
         send_message(socket, &response);
@@ -513,16 +561,25 @@ void handle_remaccess(int socket, Message *msg) {
     Message ss_msg = *msg;  // Copy original message
     ss_msg.operation = OP_SS_REMACCESS;
     
+    printf("[DEBUG] Sending OP_SS_REMACCESS to storage server\n");
     send_message(ss_socket, &ss_msg);
     
+    printf("[DEBUG] Waiting for response from storage server...\n");
     Message ss_response = {0};
     receive_message(ss_socket, &ss_response);
+    printf("[DEBUG] Received response from storage server: error_code=%d, data=%s\n",
+           ss_response.error_code, ss_response.data);
     close(ss_socket);
     
     // Forward response to client
+    if (ss_response.error_code != ERR_SUCCESS) {
+        response.msg_type = MSG_ERROR;
+    }
     response.error_code = ss_response.error_code;
     strcpy(response.data, ss_response.data);
     
+    printf("[DEBUG] Sending response to client: msg_type=%d, error_code=%d\n",
+           response.msg_type, response.error_code);
     send_message(socket, &response);
 }
 
@@ -565,6 +622,7 @@ static int user_has_access(const char *filename, const char *username, int ss_id
         info_response.error_code == ERR_NO_READ_ACCESS) {
         return 1;
     }
+    // 1. Check if the user is the owner
     char owner_search[MAX_USERNAME + 10];
     snprintf(owner_search, sizeof(owner_search), "Owner: %s", username);
     if (strstr(info_response.data, owner_search) != NULL) {
@@ -574,21 +632,19 @@ static int user_has_access(const char *filename, const char *username, int ss_id
     // 2. Check if the user is in the access list
     char *access_line = strstr(info_response.data, "Access: ");
     if (access_line == NULL) {
-        return 0; // No access line found, default to no access
+        return 0; 
     }
 
-    // Create search strings for Read or Read/Write access
+    // Create search strings with COLONS (not parentheses)
     char access_r[MAX_USERNAME + 5];
     char access_rw[MAX_USERNAME + 5];
-    snprintf(access_r, sizeof(access_r), "%s(R)", username);
-    snprintf(access_rw, sizeof(access_rw), "%s(RW)", username);
+    snprintf(access_r, sizeof(access_r), "%s:R", username);
+    snprintf(access_rw, sizeof(access_rw), "%s:RW", username);
 
+    // Check for "user:R" or "user:RW" in the access line
     if (strstr(access_line, access_r) != NULL || strstr(access_line, access_rw) != NULL) {
         return 1; // User found in access list
     }
-    
-    // *** END OF FIX ***
-
     // User is not the owner and not in the access list
     return 0;
 }
@@ -670,17 +726,24 @@ void handle_view_files(int socket, Message *msg) {
             // - Without -a flag: show files user has access to (owned OR granted access)
             // - With -a flag: show ALL files in the system (no filtering)
             
-            int is_owner = (strcmp(file->owner, msg->username) == 0);
-            int has_access = 0;
+            // int is_owner = (strcmp(file->owner, msg->username) == 0);
+            // int has_access = 0;
             
-            if (!is_owner) {
-                // Check if user has access to this file
-                has_access = user_has_access(file->filename, msg->username, file->primary_ss_id);
-            }
+            // if (!is_owner) {
+            //     // Check if user has access to this file
+            //     has_access = user_has_access(file->filename, msg->username, file->primary_ss_id);
+            // }
             
             // With -a flag: show all files (no filtering)
             // Without -a flag: only show files user owns or has been granted access to
             if (!show_all) {
+                int is_owner = (strcmp(file->owner, msg->username) == 0);
+                int has_access = 0;
+                
+                if (!is_owner) {
+                    // Check if user has access to this file
+                    has_access = user_has_access(file->filename, msg->username, file->primary_ss_id);
+                }
                 // User must be owner OR have access to see the file
                 if (!is_owner && !has_access) {
                     continue;  // Skip files user has no access to

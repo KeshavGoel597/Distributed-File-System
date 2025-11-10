@@ -137,6 +137,9 @@ int send_addaccess_request(const char *filename, const char *target_user, int ac
     int sockfd = connect_to_nm();
     if (sockfd < 0) return -1;
     
+    printf("[DEBUG] Sending ADDACCESS request for file: %s, user: %s, type: %d\n", 
+           filename, target_user, access_type);
+    
     Message request;
     memset(&request, 0, sizeof(Message));
     request.msg_type = MSG_REQUEST;
@@ -152,12 +155,17 @@ int send_addaccess_request(const char *filename, const char *target_user, int ac
         return -1;
     }
     
+    printf("[DEBUG] ADDACCESS request sent, waiting for response...\n");
+    
     Message response;
     if (receive_message(sockfd, &response) < 0) {
         fprintf(stderr, "Failed to receive ADDACCESS response\n");
         close_socket(sockfd);
         return -1;
     }
+    
+    printf("[DEBUG] ADDACCESS response received: msg_type=%d, error_code=%d\n", 
+           response.msg_type, response.error_code);
     
     if (response.msg_type == MSG_ERROR) {
         if (response.error_code == ERR_NOT_OWNER) {
@@ -182,6 +190,9 @@ int send_remaccess_request(const char *filename, const char *target_user) {
     int sockfd = connect_to_nm();
     if (sockfd < 0) return -1;
     
+    printf("[DEBUG] Sending REMACCESS request for file: %s, user: %s\n", 
+           filename, target_user);
+    
     Message request;
     memset(&request, 0, sizeof(Message));
     request.msg_type = MSG_REQUEST;
@@ -196,12 +207,17 @@ int send_remaccess_request(const char *filename, const char *target_user) {
         return -1;
     }
     
+    printf("[DEBUG] REMACCESS request sent, waiting for response...\n");
+    
     Message response;
     if (receive_message(sockfd, &response) < 0) {
         fprintf(stderr, "Failed to receive REMACCESS response\n");
         close_socket(sockfd);
         return -1;
     }
+    
+    printf("[DEBUG] REMACCESS response received: msg_type=%d, error_code=%d\n", 
+           response.msg_type, response.error_code);
     
     if (response.msg_type == MSG_ERROR) {
         if (response.error_code == ERR_NOT_OWNER) {
