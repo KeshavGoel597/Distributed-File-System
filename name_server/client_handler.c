@@ -615,13 +615,13 @@ static int user_has_access(const char *filename, const char *username, int ss_id
     
     close(ss_socket);
     
-    // If we got SUCCESS or NO_READ_ACCESS, user is known to the file
-    // If NO_READ_ACCESS, user is in access list but doesn't have read permission
-    // We consider this as "has access" for VIEW without -a flag
-    if (info_response.error_code == ERR_SUCCESS || 
-        info_response.error_code == ERR_NO_READ_ACCESS) {
-        return 1;
+    // If the INFO request failed (file doesn't exist, etc.), user has no access
+    if (info_response.error_code != ERR_SUCCESS && 
+        info_response.error_code != ERR_NO_READ_ACCESS &&
+        info_response.error_code != ERR_NO_WRITE_ACCESS) {
+        return 0;
     }
+    
     // 1. Check if the user is the owner
     char owner_search[MAX_USERNAME + 10];
     snprintf(owner_search, sizeof(owner_search), "Owner: %s", username);
@@ -726,14 +726,6 @@ void handle_view_files(int socket, Message *msg) {
             // - Without -a flag: show files user has access to (owned OR granted access)
             // - With -a flag: show ALL files in the system (no filtering)
             
-            // int is_owner = (strcmp(file->owner, msg->username) == 0);
-            // int has_access = 0;
-            
-            // if (!is_owner) {
-            //     // Check if user has access to this file
-            //     has_access = user_has_access(file->filename, msg->username, file->primary_ss_id);
-            // }
-            
             // With -a flag: show all files (no filtering)
             // Without -a flag: only show files user owns or has been granted access to
             if (!show_all) {
@@ -744,7 +736,9 @@ void handle_view_files(int socket, Message *msg) {
                     // Check if user has access to this file
                     has_access = user_has_access(file->filename, msg->username, file->primary_ss_id);
                 }
-                // User must be owner OR have access to see the file
+                
+                // Skip files where user is NOT owner AND does NOT have access
+                // In other words: only show files where user IS owner OR has access
                 if (!is_owner && !has_access) {
                     continue;  // Skip files user has no access to
                 }

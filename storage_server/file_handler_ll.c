@@ -762,17 +762,43 @@ int add_user_access_ll(const char *filename, const char *username, int access_ty
     
     pthread_mutex_lock(&metadata_mutex);
     
-    // Remove existing access first
-    remove_user_access_ll(filename, username);
+    // Remove existing access first (inline to avoid deadlock)
+    char search_rw[128], search_r[128];
+    snprintf(search_rw, sizeof(search_rw), "%s:RW", username);
+    snprintf(search_r, sizeof(search_r), "%s:R", username);
     
+    char *pos = strstr(meta->access_list, search_rw);
+    if (pos == NULL) pos = strstr(meta->access_list, search_r);
+    
+    if (pos != NULL) {
+        char *comma_before = (pos > meta->access_list && *(pos - 1) == ',') ? pos - 1 : NULL;
+        char *comma_after = strchr(pos, ',');
+        
+        if (comma_before) {
+            if (comma_after) {
+                memmove(comma_before, comma_after, strlen(comma_after) + 1);
+            } else {
+                *comma_before = '\0';
+            }
+        } else if (comma_after) {
+            memmove(pos, comma_after + 1, strlen(comma_after + 1) + 1);
+        } else {
+            *pos = '\0';
+        }
+    }
+    
+    // Add new access
     char access_str[64];
     if (access_type == ACCESS_READ) {
         snprintf(access_str, sizeof(access_str), ",%s:R", username);
+        printf("[Access Control] Granting READ-ONLY access to %s for file %s\n", username, filename);
     } else {
         snprintf(access_str, sizeof(access_str), ",%s:RW", username);
+        printf("[Access Control] Granting READ-WRITE access to %s for file %s\n", username, filename);
     }
     
     strncat(meta->access_list, access_str, MAX_DATA_SIZE - strlen(meta->access_list) - 1);
+    printf("[Access Control] Updated access list: %s\n", meta->access_list);
     pthread_mutex_unlock(&metadata_mutex);
     
     save_metadata_ll();
@@ -866,6 +892,41 @@ int save_metadata_ll() {
     pthread_mutex_unlock(&metadata_mutex);
     
     fclose(fp);
+    return 0;
+}
+
+// Ensure a sentence has a delimiter (add newline if missing)
+int ensure_sentence_delimiter_ll(const char *filename, int sentence_index) {
+    LoadedFile *file = get_file_from_cache(filename);
+    if (file == NULL) {
+        return ERR_FILE_NOT_FOUND;
+    }
+    
+    pthread_rwlock_wrlock(&file->file_rwlock);
+    
+    // Traverse to target sentence
+    SentenceNode *target_sent = file->sentences_head;
+    int current_index = 0;
+    
+    while (target_sent != NULL && current_index < sentence_index) {
+        target_sent = target_sent->next;
+        current_index++;
+    }
+    
+    if (target_sent == NULL) {
+        pthread_rwlock_unlock(&file->file_rwlock);
+        return ERR_SENTENCE_OUT_OF_RANGE;
+    }
+    
+    // If sentence doesn't have a delimiter, add newline
+    if (target_sent->delimiter == '\0') {
+        target_sent->delimiter = '\n';
+        printf("[File Handler] Added newline delimiter to sentence %d in file %s\n", 
+               sentence_index, filename);
+    }
+    
+    pthread_rwlock_unlock(&file->file_rwlock);
+    sync_file_to_disk(filename);
     return 0;
 }
 

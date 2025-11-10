@@ -177,6 +177,10 @@ int handle_write_request(int client_sockfd, Message *msg) {
         // Check for end of write (ETIRW)
         if (strcmp(write_cmd.data, "ETIRW") == 0) {
             printf("[WRITE] Received ETIRW, completing write operation\n");
+            
+            // Ensure sentence has a delimiter (add newline if missing)
+            ensure_sentence_delimiter_ll(msg->filename, msg->sentence_index);
+            
             write_completed = 1;
             break;
         }

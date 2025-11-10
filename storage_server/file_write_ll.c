@@ -161,7 +161,10 @@ int write_to_file_ll(const char *filename, int sentence_index, int word_index,
     }
     
     // Check if sentence index is valid (can be sentence_count for appending)
+    printf("[DEBUG] Write request: sentence_index=%d, file->sentence_count=%d\n", 
+           sentence_index, file->sentence_count);
     if (sentence_index < 0 || sentence_index > file->sentence_count) {
+        printf("[DEBUG] Sentence index out of range: %d > %d\n", sentence_index, file->sentence_count);
         pthread_rwlock_unlock(&file->file_rwlock);
         return ERR_SENTENCE_OUT_OF_RANGE;
     }

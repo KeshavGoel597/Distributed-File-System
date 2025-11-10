@@ -111,6 +111,9 @@ int get_file_list_ll(char *file_list, int max_size);
 // Save backup for undo
 int save_undo_backup_ll(const char *filename);
 
+// Ensure sentence has a delimiter (add newline if missing)
+int ensure_sentence_delimiter_ll(const char *filename, int sentence_index);
+
 // Load all metadata from disk
 int load_metadata_ll();
 
