@@ -132,6 +132,12 @@ int load_metadata_ll();
 // Save all metadata to disk
 int save_metadata_ll();
 
+// Add metadata entry (for folders and files)
+int add_metadata_ll(FileMetadata *metadata);
+
+// Get current timestamp
+void get_timestamp(char *buffer, size_t size);
+
 // Cleanup - free all in-memory structures
 void cleanup_file_handler_ll();
 

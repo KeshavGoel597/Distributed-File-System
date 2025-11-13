@@ -49,6 +49,15 @@ int init_name_server() {
         return -1;
     }
     
+    if (pthread_mutex_init(&nm_state->request_mutex, NULL) != 0) {
+        printf("Error: Failed to initialize request_mutex\n");
+        pthread_mutex_destroy(&nm_state->ss_list_mutex);
+        pthread_mutex_destroy(&nm_state->client_list_mutex);
+        pthread_mutex_destroy(&nm_state->assignment_mutex);
+        free(nm_state);
+        return -1;
+    }
+    
     // Initialize storage server mutexes
     for (int i = 0; i < MAX_STORAGE_SERVERS; i++) {
         if (pthread_mutex_init(&nm_state->storage_servers[i].ss_mutex, NULL) != 0) {
@@ -68,6 +77,7 @@ int init_name_server() {
     // Initialize state
     nm_state->ss_count = 0;
     nm_state->client_count = 0;
+    nm_state->request_count = 0;
     nm_state->next_primary_ss = 1;  // Start with SS1
     nm_state->running = 1;
     
@@ -244,6 +254,50 @@ void handle_connection(void *arg) {
             
         case OP_EXEC:
             handle_exec(socket, &msg);
+            break;
+        
+        case OP_CREATEFOLDER:
+            handle_createfolder(socket, &msg);
+            break;
+            
+        case OP_MOVE:
+            handle_move_file(socket, &msg);
+            break;
+            
+        case OP_VIEWFOLDER:
+            handle_viewfolder(socket, &msg);
+            break;
+            
+        case OP_CHECKPOINT:
+            handle_checkpoint(socket, &msg);
+            break;
+            
+        case OP_VIEWCHECKPOINT:
+            handle_viewcheckpoint(socket, &msg);
+            break;
+            
+        case OP_REVERT:
+            handle_revert(socket, &msg);
+            break;
+            
+        case OP_LISTCHECKPOINTS:
+            handle_listcheckpoints(socket, &msg);
+            break;
+        
+        case OP_REQUESTACCESS:
+            handle_requestaccess(socket, &msg);
+            break;
+            
+        case OP_VIEWREQUESTS:
+            handle_viewrequests(socket, &msg);
+            break;
+            
+        case OP_APPROVEREQUEST:
+            handle_approverequest(socket, &msg);
+            break;
+            
+        case OP_REJECTREQUEST:
+            handle_rejectrequest(socket, &msg);
             break;
         
         default:

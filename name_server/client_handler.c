@@ -1084,3 +1084,912 @@ void handle_exec(int socket, Message *msg) {
     
     log_operation("FILE_EXEC", msg->filename);
 }
+
+// Handle CREATEFOLDER request
+void handle_createfolder(int socket, Message *msg) {
+    printf("[Folder] Client '%s' creating folder '%s'\n", msg->username, msg->filename);
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_CREATEFOLDER;
+    response.error_code = ERR_SUCCESS;
+    
+    // Check if folder already exists
+    FileInfo *existing = find_file(msg->filename);
+    if (existing) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_EXISTS;
+        strcpy(response.data, "Folder already exists");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Get available storage server
+    int ss_id = get_available_primary_server();
+    if (ss_id < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "No storage server available");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Get storage server info
+    int ss_index = find_storage_server(ss_id);
+    if (ss_index < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
+    if (ss->status != SS_STATUS_ONLINE) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Send folder creation request to storage server
+    int ss_socket = connect_to_server(ss->ip, ss->nm_port);
+    if (ss_socket < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_CONNECTION_FAILED;
+        strcpy(response.data, "Failed to connect to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_request = {0};
+    ss_request.msg_type = MSG_REQUEST;
+    ss_request.operation = OP_CREATEFOLDER;
+    strcpy(ss_request.filename, msg->filename);
+    strcpy(ss_request.username, msg->username);
+    
+    if (send_message(ss_socket, &ss_request) < 0) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Failed to send request to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_response;
+    if (receive_message(ss_socket, &ss_response) < 0 || ss_response.msg_type == MSG_ERROR) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server failed to create folder");
+        send_message(socket, &response);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    // Add folder to file tracking (mark as directory)
+    add_file_to_server(ss_id, msg->filename, msg->username);
+    
+    strcpy(response.data, "Folder created successfully");
+    printf("[Folder] Folder '%s' created successfully on SS%d\n", msg->filename, ss_id);
+    
+    send_message(socket, &response);
+    log_operation("CREATEFOLDER", msg->filename);
+}
+
+// Handle MOVE request
+void handle_move_file(int socket, Message *msg) {
+    printf("[File Move] Client '%s' moving file '%s' to '%s'\n", 
+           msg->username, msg->filename, msg->target_path);
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_MOVE;
+    response.error_code = ERR_SUCCESS;
+    
+    // Find source file
+    FileInfo *file = find_file(msg->filename);
+    if (!file) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        strcpy(response.data, "File not found");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Check permissions (only owner can move)
+    if (strcmp(file->owner, msg->username) != 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_ACCESS_DENIED;
+        strcpy(response.data, "Only file owner can move files");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Get storage server
+    int ss_index = find_storage_server(file->primary_ss_id);
+    if (ss_index < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
+    if (ss->status != SS_STATUS_ONLINE) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Send move request to storage server
+    int ss_socket = connect_to_server(ss->ip, ss->nm_port);
+    if (ss_socket < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_CONNECTION_FAILED;
+        strcpy(response.data, "Failed to connect to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_request = {0};
+    ss_request.msg_type = MSG_REQUEST;
+    ss_request.operation = OP_MOVE;
+    strcpy(ss_request.filename, msg->filename);
+    strcpy(ss_request.target_path, msg->target_path);
+    strcpy(ss_request.username, msg->username);
+    
+    if (send_message(ss_socket, &ss_request) < 0) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Failed to send request to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_response;
+    if (receive_message(ss_socket, &ss_response) < 0 || ss_response.msg_type == MSG_ERROR) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ss_response.error_code;
+        strcpy(response.data, ss_response.data);
+        send_message(socket, &response);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    strcpy(response.data, "File moved successfully");
+    printf("[File Move] File '%s' moved successfully\n", msg->filename);
+    
+    send_message(socket, &response);
+    log_operation("MOVE", msg->filename);
+}
+
+// Handle VIEWFOLDER request
+void handle_viewfolder(int socket, Message *msg) {
+    printf("[Folder View] Client '%s' viewing folder '%s'\n", msg->username, msg->filename);
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_VIEWFOLDER;
+    response.error_code = ERR_SUCCESS;
+    
+    // Find folder
+    FileInfo *folder = find_file(msg->filename);
+    if (!folder) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        strcpy(response.data, "Folder not found");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Get storage server
+    int ss_index = find_storage_server(folder->primary_ss_id);
+    if (ss_index < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
+    if (ss->status != SS_STATUS_ONLINE) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Send viewfolder request to storage server
+    int ss_socket = connect_to_server(ss->ip, ss->nm_port);
+    if (ss_socket < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_CONNECTION_FAILED;
+        strcpy(response.data, "Failed to connect to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_request = {0};
+    ss_request.msg_type = MSG_REQUEST;
+    ss_request.operation = OP_VIEWFOLDER;
+    strcpy(ss_request.filename, msg->filename);
+    strcpy(ss_request.username, msg->username);
+    
+    if (send_message(ss_socket, &ss_request) < 0) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Failed to send request to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_response;
+    if (receive_message(ss_socket, &ss_response) < 0) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Failed to receive response from storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    // Forward storage server response to client
+    response.msg_type = ss_response.msg_type;
+    response.error_code = ss_response.error_code;
+    strcpy(response.data, ss_response.data);
+    
+    send_message(socket, &response);
+    log_operation("VIEWFOLDER", msg->filename);
+}
+
+// Handle CHECKPOINT request
+void handle_checkpoint(int socket, Message *msg) {
+    printf("[Checkpoint] Client '%s' creating checkpoint '%s' for file '%s'\n", 
+           msg->username, msg->checkpoint_tag, msg->filename);
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_CHECKPOINT;
+    response.error_code = ERR_SUCCESS;
+    
+    // Find file
+    FileInfo *file = find_file(msg->filename);
+    if (!file) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        strcpy(response.data, "File not found");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Check read access (simplified - just check owner for now)
+    // In production, would check access control list
+    
+    // Get storage server
+    int ss_index = find_storage_server(file->primary_ss_id);
+    if (ss_index < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
+    if (ss->status != SS_STATUS_ONLINE) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Send checkpoint request to storage server
+    int ss_socket = connect_to_server(ss->ip, ss->nm_port);
+    if (ss_socket < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_CONNECTION_FAILED;
+        strcpy(response.data, "Failed to connect to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_request = {0};
+    ss_request.msg_type = MSG_REQUEST;
+    ss_request.operation = OP_CHECKPOINT;
+    strcpy(ss_request.filename, msg->filename);
+    strcpy(ss_request.checkpoint_tag, msg->checkpoint_tag);
+    strcpy(ss_request.username, msg->username);
+    
+    if (send_message(ss_socket, &ss_request) < 0) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Failed to send request to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_response;
+    if (receive_message(ss_socket, &ss_response) < 0 || ss_response.msg_type == MSG_ERROR) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server failed to create checkpoint");
+        send_message(socket, &response);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    strcpy(response.data, "Checkpoint created successfully");
+    send_message(socket, &response);
+    log_operation("CHECKPOINT", msg->filename);
+}
+
+// Handle VIEWCHECKPOINT request
+void handle_viewcheckpoint(int socket, Message *msg) {
+    printf("[Checkpoint View] Client '%s' viewing checkpoint '%s' for file '%s'\n", 
+           msg->username, msg->checkpoint_tag, msg->filename);
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_VIEWCHECKPOINT;
+    response.error_code = ERR_SUCCESS;
+    
+    // Find file
+    FileInfo *file = find_file(msg->filename);
+    if (!file) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        strcpy(response.data, "File not found");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Check read access (simplified)
+    
+    // Get storage server
+    int ss_index = find_storage_server(file->primary_ss_id);
+    if (ss_index < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
+    if (ss->status != SS_STATUS_ONLINE) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Send viewcheckpoint request to storage server
+    int ss_socket = connect_to_server(ss->ip, ss->nm_port);
+    if (ss_socket < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_CONNECTION_FAILED;
+        strcpy(response.data, "Failed to connect to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_request = {0};
+    ss_request.msg_type = MSG_REQUEST;
+    ss_request.operation = OP_VIEWCHECKPOINT;
+    strcpy(ss_request.filename, msg->filename);
+    strcpy(ss_request.checkpoint_tag, msg->checkpoint_tag);
+    strcpy(ss_request.username, msg->username);
+    
+    if (send_message(ss_socket, &ss_request) < 0) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Failed to send request to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_response;
+    if (receive_message(ss_socket, &ss_response) < 0) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Failed to receive response from storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    // Forward storage server response to client
+    response.msg_type = ss_response.msg_type;
+    response.error_code = ss_response.error_code;
+    strcpy(response.data, ss_response.data);
+    
+    send_message(socket, &response);
+    log_operation("VIEWCHECKPOINT", msg->filename);
+}
+
+// Handle REVERT request
+void handle_revert(int socket, Message *msg) {
+    printf("[Revert] Client '%s' reverting file '%s' to checkpoint '%s'\n", 
+           msg->username, msg->filename, msg->checkpoint_tag);
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_REVERT;
+    response.error_code = ERR_SUCCESS;
+    
+    // Find file
+    FileInfo *file = find_file(msg->filename);
+    if (!file) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        strcpy(response.data, "File not found");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Check write access (simplified - check owner)
+    if (strcmp(file->owner, msg->username) != 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_NO_WRITE_ACCESS;
+        strcpy(response.data, "No write access to file");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Get storage server
+    int ss_index = find_storage_server(file->primary_ss_id);
+    if (ss_index < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
+    if (ss->status != SS_STATUS_ONLINE) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Send revert request to storage server
+    int ss_socket = connect_to_server(ss->ip, ss->nm_port);
+    if (ss_socket < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_CONNECTION_FAILED;
+        strcpy(response.data, "Failed to connect to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_request = {0};
+    ss_request.msg_type = MSG_REQUEST;
+    ss_request.operation = OP_REVERT;
+    strcpy(ss_request.filename, msg->filename);
+    strcpy(ss_request.checkpoint_tag, msg->checkpoint_tag);
+    strcpy(ss_request.username, msg->username);
+    
+    if (send_message(ss_socket, &ss_request) < 0) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Failed to send request to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_response;
+    if (receive_message(ss_socket, &ss_response) < 0 || ss_response.msg_type == MSG_ERROR) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ss_response.error_code;
+        strcpy(response.data, ss_response.data);
+        send_message(socket, &response);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    strcpy(response.data, "File reverted successfully");
+    send_message(socket, &response);
+    log_operation("REVERT", msg->filename);
+}
+
+// Handle LISTCHECKPOINTS request
+void handle_listcheckpoints(int socket, Message *msg) {
+    printf("[List Checkpoints] Client '%s' listing checkpoints for file '%s'\n", 
+           msg->username, msg->filename);
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_LISTCHECKPOINTS;
+    response.error_code = ERR_SUCCESS;
+    
+    // Find file
+    FileInfo *file = find_file(msg->filename);
+    if (!file) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        strcpy(response.data, "File not found");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Check read access (simplified)
+    
+    // Get storage server
+    int ss_index = find_storage_server(file->primary_ss_id);
+    if (ss_index < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
+    if (ss->status != SS_STATUS_ONLINE) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server not available");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Send listcheckpoints request to storage server
+    int ss_socket = connect_to_server(ss->ip, ss->nm_port);
+    if (ss_socket < 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_CONNECTION_FAILED;
+        strcpy(response.data, "Failed to connect to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_request = {0};
+    ss_request.msg_type = MSG_REQUEST;
+    ss_request.operation = OP_LISTCHECKPOINTS;
+    strcpy(ss_request.filename, msg->filename);
+    strcpy(ss_request.username, msg->username);
+    
+    if (send_message(ss_socket, &ss_request) < 0) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Failed to send request to storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    Message ss_response;
+    if (receive_message(ss_socket, &ss_response) < 0) {
+        close_socket(ss_socket);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Failed to receive response from storage server");
+        send_message(socket, &response);
+        return;
+    }
+    
+    close_socket(ss_socket);
+    
+    // Forward storage server response to client
+    response.msg_type = ss_response.msg_type;
+    response.error_code = ss_response.error_code;
+    strcpy(response.data, ss_response.data);
+    
+    send_message(socket, &response);
+    log_operation("LISTCHECKPOINTS", msg->filename);
+}
+
+// Handle REQUESTACCESS request
+void handle_requestaccess(int socket, Message *msg) {
+    printf("[Access Request] User '%s' requesting access to file '%s'\n", 
+           msg->username, msg->filename);
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_REQUESTACCESS;
+    response.error_code = ERR_SUCCESS;
+    
+    // Find file
+    FileInfo *file = find_file(msg->filename);
+    if (!file) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        strcpy(response.data, "File not found");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Check if requester is already the owner
+    if (strcmp(file->owner, msg->username) == 0) {
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_INVALID_OPERATION;
+        strcpy(response.data, "You already own this file");
+        send_message(socket, &response);
+        return;
+    }
+    
+    pthread_mutex_lock(&nm_state->request_mutex);
+    
+    // Check if request limit reached
+    if (nm_state->request_count >= MAX_ACCESS_REQUESTS) {
+        pthread_mutex_unlock(&nm_state->request_mutex);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Too many pending requests");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Check if request already exists
+    for (int i = 0; i < nm_state->request_count; i++) {
+        if (strcmp(nm_state->access_requests[i].filename, msg->filename) == 0 &&
+            strcmp(nm_state->access_requests[i].requester, msg->username) == 0 &&
+            nm_state->access_requests[i].status == 0) {  // Pending
+            pthread_mutex_unlock(&nm_state->request_mutex);
+            response.msg_type = MSG_ERROR;
+            response.error_code = ERR_INVALID_OPERATION;
+            strcpy(response.data, "You already have a pending request for this file");
+            send_message(socket, &response);
+            return;
+        }
+    }
+    
+    // Create new request
+    AccessRequest *req = &nm_state->access_requests[nm_state->request_count];
+    
+    // Create request_id with safe truncation to avoid warning
+    // Format: "filename:username:timestamp" - truncate to fit in MAX_FILENAME
+    char safe_filename[100];
+    char safe_username[50];
+    strncpy(safe_filename, msg->filename, 99);
+    safe_filename[99] = '\0';
+    strncpy(safe_username, msg->username, 49);
+    safe_username[49] = '\0';
+    
+    snprintf(req->request_id, MAX_FILENAME, "%s:%s:%ld", 
+             safe_filename, safe_username, (long)time(NULL));
+    
+    strncpy(req->filename, msg->filename, MAX_FILENAME - 1);
+    strncpy(req->requester, msg->username, MAX_USERNAME - 1);
+    strncpy(req->owner, file->owner, MAX_USERNAME - 1);
+    req->access_type = msg->sentence_index;  // Access type passed in sentence_index
+    req->request_time = time(NULL);
+    req->status = 0;  // Pending
+    
+    nm_state->request_count++;
+    pthread_mutex_unlock(&nm_state->request_mutex);
+    
+    snprintf(response.data, MAX_DATA_SIZE, 
+             "Access request sent to owner '%s'. Request ID: %s", 
+             file->owner, req->request_id);
+    
+    send_message(socket, &response);
+    log_operation("REQUESTACCESS", msg->filename);
+}
+
+// Handle VIEWREQUESTS request
+void handle_viewrequests(int socket, Message *msg) {
+    printf("[View Requests] User '%s' viewing access requests\n", msg->username);
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_VIEWREQUESTS;
+    response.error_code = ERR_SUCCESS;
+    
+    pthread_mutex_lock(&nm_state->request_mutex);
+    
+    char *buffer = response.data;
+    int offset = 0;
+    int found = 0;
+    
+    for (int i = 0; i < nm_state->request_count && offset < MAX_DATA_SIZE - 200; i++) {
+        AccessRequest *req = &nm_state->access_requests[i];
+        
+        // Only show pending requests for files owned by this user
+        if (req->status == 0 && strcmp(req->owner, msg->username) == 0) {
+            const char *access_str = (req->access_type == ACCESS_READ) ? "READ" : "WRITE";
+            offset += snprintf(buffer + offset, MAX_DATA_SIZE - offset - 1,
+                             "ID: %s\n  File: %s\n  User: %s\n  Access: %s\n\n",
+                             req->request_id, req->filename, req->requester, access_str);
+            found = 1;
+        }
+    }
+    
+    pthread_mutex_unlock(&nm_state->request_mutex);
+    
+    if (!found) {
+        strcpy(response.data, "No pending access requests");
+    }
+    
+    send_message(socket, &response);
+    log_operation("VIEWREQUESTS", "");
+}
+
+// Handle APPROVEREQUEST request
+void handle_approverequest(int socket, Message *msg) {
+    printf("[Approve Request] User '%s' approving request '%s'\n", 
+           msg->username, msg->checkpoint_tag);  // request_id in checkpoint_tag
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_APPROVEREQUEST;
+    response.error_code = ERR_SUCCESS;
+    
+    pthread_mutex_lock(&nm_state->request_mutex);
+    
+    // Find the request
+    AccessRequest *req = NULL;
+    for (int i = 0; i < nm_state->request_count; i++) {
+        if (strcmp(nm_state->access_requests[i].request_id, msg->checkpoint_tag) == 0) {
+            req = &nm_state->access_requests[i];
+            break;
+        }
+    }
+    
+    if (!req) {
+        pthread_mutex_unlock(&nm_state->request_mutex);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        strcpy(response.data, "Request not found");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Verify ownership
+    if (strcmp(req->owner, msg->username) != 0) {
+        pthread_mutex_unlock(&nm_state->request_mutex);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_NOT_OWNER;
+        strcpy(response.data, "You are not the owner of this file");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Check if already processed
+    if (req->status != 0) {
+        pthread_mutex_unlock(&nm_state->request_mutex);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_INVALID_OPERATION;
+        strcpy(response.data, "Request already processed");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Mark as approved
+    req->status = 1;
+    
+    // Save request details for granting access
+    char filename[MAX_FILENAME];
+    char requester[MAX_USERNAME];
+    int access_type = req->access_type;
+    strncpy(filename, req->filename, MAX_FILENAME - 1);
+    strncpy(requester, req->requester, MAX_USERNAME - 1);
+    
+    pthread_mutex_unlock(&nm_state->request_mutex);
+    
+    // Now grant the access using existing ADDACCESS logic
+    Message addaccess_msg = {0};
+    addaccess_msg.msg_type = MSG_REQUEST;
+    addaccess_msg.operation = OP_ADDACCESS;
+    strncpy(addaccess_msg.username, msg->username, MAX_USERNAME - 1);
+    strncpy(addaccess_msg.filename, filename, MAX_FILENAME - 1);
+    strncpy(addaccess_msg.data, requester, MAX_USERNAME - 1);
+    addaccess_msg.sentence_index = access_type;
+    
+    // Call existing addaccess handler (but don't send response twice)
+    FileInfo *file = find_file(filename);
+    if (file) {
+        int primary_ss_id = file->primary_ss_id;
+        int ss_index = find_storage_server(primary_ss_id);
+        if (ss_index >= 0) {
+            StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
+            int ss_socket = connect_to_server(ss->ip, ss->nm_port);
+            if (ss_socket >= 0) {
+                Message ss_msg = addaccess_msg;
+                ss_msg.operation = OP_SS_ADDACCESS;
+                send_message(ss_socket, &ss_msg);
+                
+                Message ss_response = {0};
+                receive_message(ss_socket, &ss_response);
+                close_socket(ss_socket);
+            }
+        }
+    }
+    
+    snprintf(response.data, MAX_DATA_SIZE, 
+             "Request approved. Access granted to '%s' for file '%s'", 
+             requester, filename);
+    
+    send_message(socket, &response);
+    log_operation("APPROVEREQUEST", filename);
+}
+
+// Handle REJECTREQUEST request
+void handle_rejectrequest(int socket, Message *msg) {
+    printf("[Reject Request] User '%s' rejecting request '%s'\n", 
+           msg->username, msg->checkpoint_tag);  // request_id in checkpoint_tag
+    
+    Message response = {0};
+    response.msg_type = MSG_RESPONSE;
+    response.operation = OP_REJECTREQUEST;
+    response.error_code = ERR_SUCCESS;
+    
+    pthread_mutex_lock(&nm_state->request_mutex);
+    
+    // Find the request
+    AccessRequest *req = NULL;
+    for (int i = 0; i < nm_state->request_count; i++) {
+        if (strcmp(nm_state->access_requests[i].request_id, msg->checkpoint_tag) == 0) {
+            req = &nm_state->access_requests[i];
+            break;
+        }
+    }
+    
+    if (!req) {
+        pthread_mutex_unlock(&nm_state->request_mutex);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        strcpy(response.data, "Request not found");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Verify ownership
+    if (strcmp(req->owner, msg->username) != 0) {
+        pthread_mutex_unlock(&nm_state->request_mutex);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_NOT_OWNER;
+        strcpy(response.data, "You are not the owner of this file");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Check if already processed
+    if (req->status != 0) {
+        pthread_mutex_unlock(&nm_state->request_mutex);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_INVALID_OPERATION;
+        strcpy(response.data, "Request already processed");
+        send_message(socket, &response);
+        return;
+    }
+    
+    // Mark as rejected
+    req->status = 2;
+    
+    char requester[MAX_USERNAME];
+    char filename[MAX_FILENAME];
+    strncpy(requester, req->requester, MAX_USERNAME - 1);
+    strncpy(filename, req->filename, MAX_FILENAME - 1);
+    
+    pthread_mutex_unlock(&nm_state->request_mutex);
+    
+    snprintf(response.data, MAX_DATA_SIZE, 
+             "Request rejected. Access denied to '%s' for file '%s'", 
+             requester, filename);
+    
+    send_message(socket, &response);
+    log_operation("REJECTREQUEST", filename);
+}

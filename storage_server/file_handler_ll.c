@@ -26,7 +26,7 @@ static int metadata_count = 0;
 static pthread_mutex_t metadata_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Helper function to get current timestamp
-static void get_timestamp(char *buffer, size_t size) {
+void get_timestamp(char *buffer, size_t size) {
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
     strftime(buffer, size, "%Y-%m-%d %H:%M:%S", t);
@@ -991,6 +991,38 @@ int save_metadata_ll() {
     pthread_mutex_unlock(&metadata_mutex);
     
     fclose(fp);
+    return 0;
+}
+
+// Add metadata entry (used for folders and other entries)
+int add_metadata_ll(FileMetadata *metadata) {
+    pthread_mutex_lock(&metadata_mutex);
+    
+    // Check if already exists
+    for (int i = 0; i < metadata_count; i++) {
+        if (strcmp(metadata_list[i].filename, metadata->filename) == 0) {
+            pthread_mutex_unlock(&metadata_mutex);
+            fprintf(stderr, "Metadata for '%s' already exists\n", metadata->filename);
+            return ERR_FILE_EXISTS;
+        }
+    }
+    
+    // Check capacity
+    if (metadata_count >= MAX_FILES) {
+        pthread_mutex_unlock(&metadata_mutex);
+        fprintf(stderr, "Maximum file limit reached\n");
+        return -1;
+    }
+    
+    // Add to list
+    memcpy(&metadata_list[metadata_count], metadata, sizeof(FileMetadata));
+    metadata_count++;
+    pthread_mutex_unlock(&metadata_mutex);
+    
+    // Save to disk
+    save_metadata_ll();
+    
+    printf("Added metadata for '%s'\n", metadata->filename);
     return 0;
 }
 

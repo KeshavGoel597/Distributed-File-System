@@ -10,6 +10,7 @@
 #define MAX_STORAGE_SERVERS 100
 #define MAX_FILES_PER_SERVER 1000
 #define MAX_CLIENTS 100
+#define MAX_ACCESS_REQUESTS 1000
 #define HEARTBEAT_INTERVAL 10  // seconds
 #define HEARTBEAT_TIMEOUT 30   // seconds
 #define FILE_HASH_TABLE_SIZE 10007  // Prime number for better distribution
@@ -28,6 +29,17 @@ typedef struct {
     time_t created_time;
     time_t modified_time;
 } FileInfo;
+
+// Access Request Structure
+typedef struct {
+    char request_id[MAX_FILENAME];  // Format: "filename:username:timestamp"
+    char filename[MAX_FILENAME];
+    char requester[MAX_USERNAME];
+    char owner[MAX_USERNAME];
+    int access_type;  // ACCESS_READ or ACCESS_WRITE
+    time_t request_time;
+    int status;  // 0=pending, 1=approved, 2=rejected
+} AccessRequest;
 
 // Storage Server Information Structure
 typedef struct {
@@ -77,6 +89,10 @@ typedef struct {
     pthread_mutex_t client_list_mutex;
     
     FileHashTable file_index;  // Hash table for O(1) file lookups
+    
+    AccessRequest access_requests[MAX_ACCESS_REQUESTS];
+    int request_count;
+    pthread_mutex_t request_mutex;
     
     int next_primary_ss;  // Round-robin for file assignment
     pthread_mutex_t assignment_mutex;
@@ -133,6 +149,17 @@ void handle_remaccess(int client_socket, Message *msg);
 void handle_list_files(int client_socket, Message *msg);
 void handle_view_files(int client_socket, Message *msg);
 void handle_exec(int client_socket, Message *msg);
+void handle_createfolder(int socket, Message *msg);
+void handle_move_file(int socket, Message *msg);
+void handle_viewfolder(int socket, Message *msg);
+void handle_checkpoint(int socket, Message *msg);
+void handle_viewcheckpoint(int socket, Message *msg);
+void handle_revert(int socket, Message *msg);
+void handle_listcheckpoints(int socket, Message *msg);
+void handle_requestaccess(int socket, Message *msg);
+void handle_viewrequests(int socket, Message *msg);
+void handle_approverequest(int socket, Message *msg);
+void handle_rejectrequest(int socket, Message *msg);
 
 // Heartbeat and monitoring
 void* heartbeat_monitor(void* arg);

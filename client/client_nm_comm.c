@@ -407,3 +407,448 @@ int get_ss_info(const char *filename, char *ss_ip, int *ss_port) {
     close_socket(sockfd);
     return 0;
 }
+
+// Send CREATEFOLDER request to Name Server
+int send_createfolder_request(const char *foldername) {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_CREATEFOLDER;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    strncpy(request.filename, foldername, MAX_FILENAME - 1);
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send CREATEFOLDER request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive CREATEFOLDER response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        if (response.error_code == ERR_FILE_EXISTS) {
+            fprintf(stderr, "Error: Folder '%s' already exists\n", foldername);
+        } else {
+            fprintf(stderr, "Error: %d\n", response.error_code);
+        }
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    printf("Folder '%s' created successfully\n", foldername);
+    close_socket(sockfd);
+    return 0;
+}
+
+// Send MOVE request to Name Server
+int send_move_request(const char *filename, const char *target_folder) {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_MOVE;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    strncpy(request.filename, filename, MAX_FILENAME - 1);
+    strncpy(request.target_path, target_folder, MAX_PATH - 1);
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send MOVE request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive MOVE response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        if (response.error_code == ERR_FILE_NOT_FOUND) {
+            fprintf(stderr, "Error: File '%s' not found\n", filename);
+        } else if (response.error_code == ERR_ACCESS_DENIED) {
+            fprintf(stderr, "Error: Access denied for '%s'\n", filename);
+        } else {
+            fprintf(stderr, "Error: %d\n", response.error_code);
+        }
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    printf("File '%s' moved to '%s' successfully\n", filename, target_folder);
+    close_socket(sockfd);
+    return 0;
+}
+
+// Send VIEWFOLDER request to Name Server
+int send_viewfolder_request(const char *foldername) {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_VIEWFOLDER;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    strncpy(request.filename, foldername, MAX_FILENAME - 1);
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send VIEWFOLDER request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive VIEWFOLDER response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        if (response.error_code == ERR_FILE_NOT_FOUND) {
+            fprintf(stderr, "Error: Folder '%s' not found\n", foldername);
+        } else {
+            fprintf(stderr, "Error: %d\n", response.error_code);
+        }
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    // Display folder contents
+    printf("Contents of folder '%s':\n%s\n", foldername, response.data);
+    close_socket(sockfd);
+    return 0;
+}
+
+// Send CHECKPOINT request to Name Server
+int send_checkpoint_request(const char *filename, const char *checkpoint_tag) {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_CHECKPOINT;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    strncpy(request.filename, filename, MAX_FILENAME - 1);
+    strncpy(request.checkpoint_tag, checkpoint_tag, MAX_FILENAME - 1);
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send CHECKPOINT request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive CHECKPOINT response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        if (response.error_code == ERR_FILE_NOT_FOUND) {
+            fprintf(stderr, "Error: File '%s' not found\n", filename);
+        } else if (response.error_code == ERR_NO_READ_ACCESS) {
+            fprintf(stderr, "Error: No read access to file '%s'\n", filename);
+        } else {
+            fprintf(stderr, "Error: %d\n", response.error_code);
+        }
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    printf("Checkpoint '%s' created for file '%s'\n", checkpoint_tag, filename);
+    close_socket(sockfd);
+    return 0;
+}
+
+// Send VIEWCHECKPOINT request to Name Server
+int send_viewcheckpoint_request(const char *filename, const char *checkpoint_tag) {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_VIEWCHECKPOINT;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    strncpy(request.filename, filename, MAX_FILENAME - 1);
+    strncpy(request.checkpoint_tag, checkpoint_tag, MAX_FILENAME - 1);
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send VIEWCHECKPOINT request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive VIEWCHECKPOINT response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        if (response.error_code == ERR_FILE_NOT_FOUND) {
+            fprintf(stderr, "Error: Checkpoint '%s' not found for file '%s'\n", checkpoint_tag, filename);
+        } else if (response.error_code == ERR_NO_READ_ACCESS) {
+            fprintf(stderr, "Error: No read access to file '%s'\n", filename);
+        } else {
+            fprintf(stderr, "Error: %d\n", response.error_code);
+        }
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    // Display checkpoint content
+    printf("=== Checkpoint '%s' for '%s' ===\n%s\n", checkpoint_tag, filename, response.data);
+    close_socket(sockfd);
+    return 0;
+}
+
+// Send REVERT request to Name Server
+int send_revert_request(const char *filename, const char *checkpoint_tag) {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_REVERT;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    strncpy(request.filename, filename, MAX_FILENAME - 1);
+    strncpy(request.checkpoint_tag, checkpoint_tag, MAX_FILENAME - 1);
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send REVERT request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive REVERT response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        if (response.error_code == ERR_FILE_NOT_FOUND) {
+            fprintf(stderr, "Error: Checkpoint '%s' not found for file '%s'\n", checkpoint_tag, filename);
+        } else if (response.error_code == ERR_NO_WRITE_ACCESS) {
+            fprintf(stderr, "Error: No write access to file '%s'\n", filename);
+        } else {
+            fprintf(stderr, "Error: %d\n", response.error_code);
+        }
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    printf("File '%s' reverted to checkpoint '%s' successfully\n", filename, checkpoint_tag);
+    close_socket(sockfd);
+    return 0;
+}
+
+// Send LISTCHECKPOINTS request to Name Server
+int send_listcheckpoints_request(const char *filename) {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_LISTCHECKPOINTS;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    strncpy(request.filename, filename, MAX_FILENAME - 1);
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send LISTCHECKPOINTS request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive LISTCHECKPOINTS response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        if (response.error_code == ERR_FILE_NOT_FOUND) {
+            fprintf(stderr, "Error: File '%s' not found\n", filename);
+        } else if (response.error_code == ERR_NO_READ_ACCESS) {
+            fprintf(stderr, "Error: No read access to file '%s'\n", filename);
+        } else {
+            fprintf(stderr, "Error: %d\n", response.error_code);
+        }
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    // Display checkpoints list
+    printf("Checkpoints for file '%s':\n%s\n", filename, response.data);
+    close_socket(sockfd);
+    return 0;
+}
+
+// Send REQUESTACCESS request to Name Server
+int send_requestaccess_request(const char *filename, int access_type) {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_REQUESTACCESS;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    strncpy(request.filename, filename, MAX_FILENAME - 1);
+    request.sentence_index = access_type;  // Use sentence_index for access type
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send REQUESTACCESS request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive REQUESTACCESS response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        if (response.error_code == ERR_FILE_NOT_FOUND) {
+            fprintf(stderr, "Error: File '%s' not found\n", filename);
+        } else {
+            fprintf(stderr, "Error: %d - %s\n", response.error_code, response.data);
+        }
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    printf("%s\n", response.data);
+    close_socket(sockfd);
+    return 0;
+}
+
+// Send VIEWREQUESTS request to Name Server
+int send_viewrequests_request() {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_VIEWREQUESTS;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send VIEWREQUESTS request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive VIEWREQUESTS response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        fprintf(stderr, "Error: %d - %s\n", response.error_code, response.data);
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    printf("=== Pending Access Requests ===\n%s\n", response.data);
+    close_socket(sockfd);
+    return 0;
+}
+
+// Send APPROVEREQUEST request to Name Server
+int send_approverequest_request(const char *request_id) {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_APPROVEREQUEST;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    strncpy(request.checkpoint_tag, request_id, MAX_FILENAME - 1);  // Reuse checkpoint_tag for request_id
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send APPROVEREQUEST request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive APPROVEREQUEST response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        fprintf(stderr, "Error: %d - %s\n", response.error_code, response.data);
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    printf("%s\n", response.data);
+    close_socket(sockfd);
+    return 0;
+}
+
+// Send REJECTREQUEST request to Name Server
+int send_rejectrequest_request(const char *request_id) {
+    int sockfd = connect_to_nm();
+    if (sockfd < 0) return -1;
+    
+    Message request;
+    memset(&request, 0, sizeof(Message));
+    request.msg_type = MSG_REQUEST;
+    request.operation = OP_REJECTREQUEST;
+    strncpy(request.username, client_config.username, MAX_USERNAME - 1);
+    strncpy(request.checkpoint_tag, request_id, MAX_FILENAME - 1);  // Reuse checkpoint_tag for request_id
+    
+    if (send_message(sockfd, &request) < 0) {
+        fprintf(stderr, "Failed to send REJECTREQUEST request\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    Message response;
+    if (receive_message(sockfd, &response) < 0) {
+        fprintf(stderr, "Failed to receive REJECTREQUEST response\n");
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    if (response.msg_type == MSG_ERROR) {
+        fprintf(stderr, "Error: %d - %s\n", response.error_code, response.data);
+        close_socket(sockfd);
+        return -1;
+    }
+    
+    printf("%s\n", response.data);
+    close_socket(sockfd);
+    return 0;
+}

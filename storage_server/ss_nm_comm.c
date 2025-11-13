@@ -8,6 +8,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <errno.h>
 
 // Register storage server with Name Server
 int register_with_nm(int nm_port, int client_port, const char *ss_ip) {
@@ -263,6 +266,255 @@ void* handle_nm_connection(void *arg) {
                 response.error_code = ERR_CONNECTION_FAILED;
             } else {
                 printf("[NM Handler] Successfully handled backup info\n");
+            }
+            break;
+        }
+        
+        case OP_CREATEFOLDER: {
+            printf("[NM Handler] CREATEFOLDER request: %s by %s\n", 
+                   request.filename, request.username);
+            
+            // Create folder in the files directory
+            char folder_path[MAX_PATH];
+            snprintf(folder_path, MAX_PATH, "%s/files/%s", server_config.storage_dir, request.filename);
+            
+            // Create the folder directory
+            if (mkdir(folder_path, 0755) < 0) {
+                if (errno == EEXIST) {
+                    response.error_code = ERR_FILE_EXISTS;
+                    snprintf(response.data, MAX_DATA_SIZE, "Folder already exists");
+                } else {
+                    response.error_code = ERR_SERVER_ERROR;
+                    snprintf(response.data, MAX_DATA_SIZE, "Failed to create folder: %s", strerror(errno));
+                }
+            } else {
+                // Add folder to metadata for persistence
+                FileMetadata folder_meta;
+                memset(&folder_meta, 0, sizeof(FileMetadata));
+                strncpy(folder_meta.filename, request.filename, MAX_FILENAME - 1);
+                strncpy(folder_meta.owner, request.username, MAX_USERNAME - 1);
+                get_timestamp(folder_meta.created_time, sizeof(folder_meta.created_time));
+                get_timestamp(folder_meta.modified_time, sizeof(folder_meta.modified_time));
+                folder_meta.file_size = 0;  // Folders have size 0
+                folder_meta.word_count = -1;  // Use -1 to mark as folder (not a file)
+                folder_meta.char_count = 0;
+                folder_meta.access_list[0] = '\0';
+                
+                add_metadata_ll(&folder_meta);
+                
+                response.error_code = ERR_SUCCESS;
+                snprintf(response.data, MAX_DATA_SIZE, "Folder created successfully");
+            }
+            break;
+        }
+        
+        case OP_MOVE: {
+            printf("[NM Handler] MOVE request: %s to %s by %s\n", 
+                   request.filename, request.target_path, request.username);
+            
+            char src_path[MAX_PATH];
+            char dst_path[MAX_PATH];
+            char dst_dir[MAX_PATH];
+            
+            // Source file is in files/ directory
+            snprintf(src_path, MAX_PATH, "%s/files/%s", server_config.storage_dir, request.filename);
+            
+            // Destination folder should also be in files/ directory
+            snprintf(dst_dir, MAX_PATH, "%s/files/%s", server_config.storage_dir, request.target_path);
+            snprintf(dst_path, MAX_PATH, "%s/%s", dst_dir, request.filename);
+            
+            // Check if source exists
+            if (access(src_path, F_OK) != 0) {
+                response.error_code = ERR_FILE_NOT_FOUND;
+                snprintf(response.data, MAX_DATA_SIZE, "Source file not found");
+            } else if (access(dst_dir, F_OK) != 0) {
+                response.error_code = ERR_FILE_NOT_FOUND;
+                snprintf(response.data, MAX_DATA_SIZE, "Destination folder does not exist");
+            } else if (rename(src_path, dst_path) < 0) {
+                response.error_code = ERR_SERVER_ERROR;
+                snprintf(response.data, MAX_DATA_SIZE, "Failed to move file: %s", strerror(errno));
+            } else {
+                response.error_code = ERR_SUCCESS;
+                snprintf(response.data, MAX_DATA_SIZE, "File moved successfully");
+                
+                // Also move undo file if exists
+                char undo_src[MAX_PATH], undo_dst[MAX_PATH];
+                snprintf(undo_src, MAX_PATH, "%s/undo/%s.undo", server_config.storage_dir, request.filename);
+                snprintf(undo_dst, MAX_PATH, "%s/files/%s/%s.undo", 
+                         server_config.storage_dir, request.target_path, request.filename);
+                rename(undo_src, undo_dst);  // Ignore errors
+            }
+            break;
+        }
+        
+        case OP_VIEWFOLDER: {
+            printf("[NM Handler] VIEWFOLDER request: %s by %s\n", 
+                   request.filename, request.username);
+            
+            char folder_path[MAX_PATH];
+            snprintf(folder_path, MAX_PATH, "%s/files/%s", server_config.storage_dir, request.filename);
+            
+            DIR *dir = opendir(folder_path);
+            if (!dir) {
+                response.error_code = ERR_FILE_NOT_FOUND;
+                snprintf(response.data, MAX_DATA_SIZE, "Folder not found");
+            } else {
+                struct dirent *entry;
+                response.data[0] = '\0';
+                int offset = 0;
+                
+                while ((entry = readdir(dir)) != NULL && offset < MAX_DATA_SIZE - 100) {
+                    if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+                        offset += snprintf(response.data + offset, MAX_DATA_SIZE - offset - 1,
+                                         "%s\n", entry->d_name);
+                    }
+                }
+                closedir(dir);
+                response.error_code = ERR_SUCCESS;
+            }
+            break;
+        }
+        
+        case OP_CHECKPOINT: {
+            printf("[NM Handler] CHECKPOINT request: %s tag=%s by %s\n", 
+                   request.filename, request.checkpoint_tag, request.username);
+            
+            char src_path[MAX_PATH];
+            char checkpoint_path[MAX_PATH];
+            snprintf(src_path, MAX_PATH, "%s/files/%s", server_config.storage_dir, request.filename);
+            snprintf(checkpoint_path, MAX_PATH, "%s/checkpoints/%s.%s", 
+                     server_config.storage_dir, request.filename, request.checkpoint_tag);
+            
+            // Create checkpoints directory if needed
+            char checkpoint_dir[MAX_PATH];
+            snprintf(checkpoint_dir, MAX_PATH, "%s/checkpoints", server_config.storage_dir);
+            mkdir(checkpoint_dir, 0755);
+            
+            // Copy file to checkpoint
+            FILE *src = fopen(src_path, "r");
+            if (!src) {
+                response.error_code = ERR_FILE_NOT_FOUND;
+                snprintf(response.data, MAX_DATA_SIZE, "File not found");
+            } else {
+                FILE *dst = fopen(checkpoint_path, "w");
+                if (!dst) {
+                    fclose(src);
+                    response.error_code = ERR_SERVER_ERROR;
+                    snprintf(response.data, MAX_DATA_SIZE, "Failed to create checkpoint");
+                } else {
+                    char buffer[4096];
+                    size_t bytes;
+                    while ((bytes = fread(buffer, 1, sizeof(buffer), src)) > 0) {
+                        fwrite(buffer, 1, bytes, dst);
+                    }
+                    fclose(src);
+                    fclose(dst);
+                    response.error_code = ERR_SUCCESS;
+                    snprintf(response.data, MAX_DATA_SIZE, "Checkpoint created successfully");
+                }
+            }
+            break;
+        }
+        
+        case OP_VIEWCHECKPOINT: {
+            printf("[NM Handler] VIEWCHECKPOINT request: %s tag=%s by %s\n", 
+                   request.filename, request.checkpoint_tag, request.username);
+            
+            char checkpoint_path[MAX_PATH];
+            snprintf(checkpoint_path, MAX_PATH, "%s/checkpoints/%s.%s", 
+                     server_config.storage_dir, request.filename, request.checkpoint_tag);
+            
+            FILE *fp = fopen(checkpoint_path, "r");
+            if (!fp) {
+                response.error_code = ERR_FILE_NOT_FOUND;
+                snprintf(response.data, MAX_DATA_SIZE, "Checkpoint not found");
+            } else {
+                size_t bytes = fread(response.data, 1, MAX_DATA_SIZE - 1, fp);
+                response.data[bytes] = '\0';
+                fclose(fp);
+                response.error_code = ERR_SUCCESS;
+            }
+            break;
+        }
+        
+        case OP_REVERT: {
+            printf("[NM Handler] REVERT request: %s to tag=%s by %s\n", 
+                   request.filename, request.checkpoint_tag, request.username);
+            
+            char file_path[MAX_PATH];
+            char checkpoint_path[MAX_PATH];
+            snprintf(file_path, MAX_PATH, "%s/files/%s", server_config.storage_dir, request.filename);
+            snprintf(checkpoint_path, MAX_PATH, "%s/checkpoints/%s.%s", 
+                     server_config.storage_dir, request.filename, request.checkpoint_tag);
+            
+            // Check if checkpoint exists
+            if (access(checkpoint_path, F_OK) != 0) {
+                response.error_code = ERR_FILE_NOT_FOUND;
+                snprintf(response.data, MAX_DATA_SIZE, "Checkpoint not found");
+            } else {
+                // Copy checkpoint to file
+                FILE *src = fopen(checkpoint_path, "r");
+                FILE *dst = fopen(file_path, "w");
+                
+                if (!src || !dst) {
+                    if (src) fclose(src);
+                    if (dst) fclose(dst);
+                    response.error_code = ERR_SERVER_ERROR;
+                    snprintf(response.data, MAX_DATA_SIZE, "Failed to revert file");
+                } else {
+                    char buffer[4096];
+                    size_t bytes;
+                    while ((bytes = fread(buffer, 1, sizeof(buffer), src)) > 0) {
+                        fwrite(buffer, 1, bytes, dst);
+                    }
+                    fclose(src);
+                    fclose(dst);
+                    response.error_code = ERR_SUCCESS;
+                    snprintf(response.data, MAX_DATA_SIZE, "File reverted successfully");
+                    
+                    // Update metadata - use the simpler function that just updates modified time
+                    update_file_modified_time_ll(request.filename);
+                }
+            }
+            break;
+        }
+        
+        case OP_LISTCHECKPOINTS: {
+            printf("[NM Handler] LISTCHECKPOINTS request: %s by %s\n", 
+                   request.filename, request.username);
+            
+            char checkpoint_dir[MAX_PATH];
+            snprintf(checkpoint_dir, MAX_PATH, "%s/checkpoints", server_config.storage_dir);
+            
+            DIR *dir = opendir(checkpoint_dir);
+            if (!dir) {
+                response.error_code = ERR_SUCCESS;
+                snprintf(response.data, MAX_DATA_SIZE, "No checkpoints found");
+            } else {
+                struct dirent *entry;
+                response.data[0] = '\0';
+                int offset = 0;
+                int found = 0;
+                
+                // Look for checkpoints matching this filename
+                char prefix[MAX_FILENAME + 2];
+                snprintf(prefix, sizeof(prefix), "%s.", request.filename);
+                
+                while ((entry = readdir(dir)) != NULL && offset < MAX_DATA_SIZE - 100) {
+                    if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0) {
+                        // Extract tag (everything after filename.)
+                        const char *tag = entry->d_name + strlen(prefix);
+                        offset += snprintf(response.data + offset, MAX_DATA_SIZE - offset - 1,
+                                         "%s\n", tag);
+                        found = 1;
+                    }
+                }
+                closedir(dir);
+                
+                if (!found) {
+                    snprintf(response.data, MAX_DATA_SIZE, "No checkpoints found for this file");
+                }
+                response.error_code = ERR_SUCCESS;
             }
             break;
         }

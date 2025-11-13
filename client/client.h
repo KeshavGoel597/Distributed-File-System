@@ -34,6 +34,17 @@ typedef enum {
     CMD_REMACCESS,
     CMD_EXEC,
     CMD_UNDO,
+    CMD_CREATEFOLDER,
+    CMD_MOVE,
+    CMD_VIEWFOLDER,
+    CMD_CHECKPOINT,
+    CMD_VIEWCHECKPOINT,
+    CMD_REVERT,
+    CMD_LISTCHECKPOINTS,
+    CMD_REQUESTACCESS,
+    CMD_VIEWREQUESTS,
+    CMD_APPROVEREQUEST,
+    CMD_REJECTREQUEST,
     CMD_EXIT,
     CMD_HELP,
     CMD_UNKNOWN
@@ -44,6 +55,9 @@ typedef struct {
     CommandType type;
     char filename[MAX_FILENAME];
     char target_user[MAX_USERNAME];
+    char checkpoint_tag[MAX_FILENAME];  // For checkpoint operations
+    char target_path[MAX_PATH];         // For MOVE and folder operations
+    char request_id[MAX_FILENAME];      // For access request operations
     int access_type;       // For ADDACCESS: ACCESS_READ or ACCESS_WRITE
     int view_flags;        // For VIEW: VIEW_FLAG_ALL, VIEW_FLAG_LONG, etc.
     int sentence_index;    // For WRITE
@@ -117,5 +131,22 @@ int send_stream_request(const char *filename);
 
 // Send UNDO request (through Name Server, but may involve SS)
 int send_undo_request(const char *filename);
+
+// Hierarchical folder operations
+int send_createfolder_request(const char *foldername);
+int send_move_request(const char *filename, const char *target_folder);
+int send_viewfolder_request(const char *foldername);
+
+// Checkpoint operations
+int send_checkpoint_request(const char *filename, const char *checkpoint_tag);
+int send_viewcheckpoint_request(const char *filename, const char *checkpoint_tag);
+int send_revert_request(const char *filename, const char *checkpoint_tag);
+int send_listcheckpoints_request(const char *filename);
+
+// Access request operations
+int send_requestaccess_request(const char *filename, int access_type);
+int send_viewrequests_request();
+int send_approverequest_request(const char *request_id);
+int send_rejectrequest_request(const char *request_id);
 
 #endif // CLIENT_H

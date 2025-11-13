@@ -114,6 +114,39 @@ static int handle_command(ParsedCommand *cmd) {
         case CMD_UNDO:
             return send_undo_request(cmd->filename);
             
+        case CMD_CREATEFOLDER:
+            return send_createfolder_request(cmd->filename);
+            
+        case CMD_MOVE:
+            return send_move_request(cmd->filename, cmd->target_path);
+            
+        case CMD_VIEWFOLDER:
+            return send_viewfolder_request(cmd->filename);
+            
+        case CMD_CHECKPOINT:
+            return send_checkpoint_request(cmd->filename, cmd->checkpoint_tag);
+            
+        case CMD_VIEWCHECKPOINT:
+            return send_viewcheckpoint_request(cmd->filename, cmd->checkpoint_tag);
+            
+        case CMD_REVERT:
+            return send_revert_request(cmd->filename, cmd->checkpoint_tag);
+            
+        case CMD_LISTCHECKPOINTS:
+            return send_listcheckpoints_request(cmd->filename);
+            
+        case CMD_REQUESTACCESS:
+            return send_requestaccess_request(cmd->filename, cmd->access_type);
+            
+        case CMD_VIEWREQUESTS:
+            return send_viewrequests_request();
+            
+        case CMD_APPROVEREQUEST:
+            return send_approverequest_request(cmd->request_id);
+            
+        case CMD_REJECTREQUEST:
+            return send_rejectrequest_request(cmd->request_id);
+            
         case CMD_HELP:
             display_help();
             return 0;

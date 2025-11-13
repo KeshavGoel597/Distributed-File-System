@@ -32,6 +32,17 @@
 #define OP_REMACCESS 109
 #define OP_EXEC 110
 #define OP_UNDO 111
+#define OP_CREATEFOLDER 112
+#define OP_MOVE 113
+#define OP_VIEWFOLDER 114
+#define OP_CHECKPOINT 115
+#define OP_VIEWCHECKPOINT 116
+#define OP_REVERT 117
+#define OP_LISTCHECKPOINTS 118
+#define OP_REQUESTACCESS 119
+#define OP_VIEWREQUESTS 120
+#define OP_APPROVEREQUEST 121
+#define OP_REJECTREQUEST 122
 
 // Registration Operations
 #define OP_SS_REGISTER 200
@@ -95,6 +106,8 @@ typedef struct {
 
     char username[MAX_USERNAME];
     char filename[MAX_FILENAME];
+    char checkpoint_tag[MAX_FILENAME];  // For checkpoint operations
+    char target_path[MAX_PATH];         // For MOVE and folder operations
     
     // For WRITE operation
     int sentence_index;

@@ -199,6 +199,149 @@ CommandType parse_command(const char *input, ParsedCommand *cmd) {
         return CMD_UNKNOWN;
     }
     
+    // Parse CREATEFOLDER command
+    if (strcmp(command, "CREATEFOLDER") == 0) {
+        cmd->type = CMD_CREATEFOLDER;
+        token = strtok(NULL, " \t\n");
+        if (token != NULL) {
+            strncpy(cmd->filename, token, MAX_FILENAME - 1);
+            return CMD_CREATEFOLDER;
+        }
+        return CMD_UNKNOWN;
+    }
+    
+    // Parse MOVE command
+    if (strcmp(command, "MOVE") == 0) {
+        cmd->type = CMD_MOVE;
+        token = strtok(NULL, " \t\n");
+        if (token != NULL) {
+            strncpy(cmd->filename, token, MAX_FILENAME - 1);
+            token = strtok(NULL, " \t\n");
+            if (token != NULL) {
+                strncpy(cmd->target_path, token, MAX_PATH - 1);
+                return CMD_MOVE;
+            }
+        }
+        return CMD_UNKNOWN;
+    }
+    
+    // Parse VIEWFOLDER command
+    if (strcmp(command, "VIEWFOLDER") == 0) {
+        cmd->type = CMD_VIEWFOLDER;
+        token = strtok(NULL, " \t\n");
+        if (token != NULL) {
+            strncpy(cmd->filename, token, MAX_FILENAME - 1);
+            return CMD_VIEWFOLDER;
+        }
+        return CMD_UNKNOWN;
+    }
+    
+    // Parse CHECKPOINT command
+    if (strcmp(command, "CHECKPOINT") == 0) {
+        cmd->type = CMD_CHECKPOINT;
+        token = strtok(NULL, " \t\n");
+        if (token != NULL) {
+            strncpy(cmd->filename, token, MAX_FILENAME - 1);
+            token = strtok(NULL, " \t\n");
+            if (token != NULL) {
+                strncpy(cmd->checkpoint_tag, token, MAX_FILENAME - 1);
+                return CMD_CHECKPOINT;
+            }
+        }
+        return CMD_UNKNOWN;
+    }
+    
+    // Parse VIEWCHECKPOINT command
+    if (strcmp(command, "VIEWCHECKPOINT") == 0) {
+        cmd->type = CMD_VIEWCHECKPOINT;
+        token = strtok(NULL, " \t\n");
+        if (token != NULL) {
+            strncpy(cmd->filename, token, MAX_FILENAME - 1);
+            token = strtok(NULL, " \t\n");
+            if (token != NULL) {
+                strncpy(cmd->checkpoint_tag, token, MAX_FILENAME - 1);
+                return CMD_VIEWCHECKPOINT;
+            }
+        }
+        return CMD_UNKNOWN;
+    }
+    
+    // Parse REVERT command
+    if (strcmp(command, "REVERT") == 0) {
+        cmd->type = CMD_REVERT;
+        token = strtok(NULL, " \t\n");
+        if (token != NULL) {
+            strncpy(cmd->filename, token, MAX_FILENAME - 1);
+            token = strtok(NULL, " \t\n");
+            if (token != NULL) {
+                strncpy(cmd->checkpoint_tag, token, MAX_FILENAME - 1);
+                return CMD_REVERT;
+            }
+        }
+        return CMD_UNKNOWN;
+    }
+    
+    // Parse LISTCHECKPOINTS command
+    if (strcmp(command, "LISTCHECKPOINTS") == 0) {
+        cmd->type = CMD_LISTCHECKPOINTS;
+        token = strtok(NULL, " \t\n");
+        if (token != NULL) {
+            strncpy(cmd->filename, token, MAX_FILENAME - 1);
+            return CMD_LISTCHECKPOINTS;
+        }
+        return CMD_UNKNOWN;
+    }
+    
+    // Parse REQUESTACCESS command
+    if (strcmp(command, "REQUESTACCESS") == 0) {
+        cmd->type = CMD_REQUESTACCESS;
+        token = strtok(NULL, " \t\n");
+        if (token != NULL && token[0] == '-') {
+            if (token[1] == 'R' || token[1] == 'r') {
+                cmd->access_type = ACCESS_READ;
+            } else if (token[1] == 'W' || token[1] == 'w') {
+                cmd->access_type = ACCESS_WRITE;
+            } else {
+                return CMD_UNKNOWN;
+            }
+            
+            token = strtok(NULL, " \t\n");
+            if (token != NULL) {
+                strncpy(cmd->filename, token, MAX_FILENAME - 1);
+                return CMD_REQUESTACCESS;
+            }
+        }
+        return CMD_UNKNOWN;
+    }
+    
+    // Parse VIEWREQUESTS command
+    if (strcmp(command, "VIEWREQUESTS") == 0) {
+        cmd->type = CMD_VIEWREQUESTS;
+        return CMD_VIEWREQUESTS;
+    }
+    
+    // Parse APPROVEREQUEST command
+    if (strcmp(command, "APPROVEREQUEST") == 0) {
+        cmd->type = CMD_APPROVEREQUEST;
+        token = strtok(NULL, " \t\n");
+        if (token != NULL) {
+            strncpy(cmd->request_id, token, MAX_FILENAME - 1);
+            return CMD_APPROVEREQUEST;
+        }
+        return CMD_UNKNOWN;
+    }
+    
+    // Parse REJECTREQUEST command
+    if (strcmp(command, "REJECTREQUEST") == 0) {
+        cmd->type = CMD_REJECTREQUEST;
+        token = strtok(NULL, " \t\n");
+        if (token != NULL) {
+            strncpy(cmd->request_id, token, MAX_FILENAME - 1);
+            return CMD_REJECTREQUEST;
+        }
+        return CMD_UNKNOWN;
+    }
+    
     // Parse EXIT command
     if (strcmp(command, "EXIT") == 0 || strcmp(command, "QUIT") == 0) {
         cmd->type = CMD_EXIT;
@@ -226,11 +369,22 @@ void display_help() {
     printf("  INFO <filename>          - Display file information\n");
     printf("  STREAM <filename>        - Stream file content word-by-word\n");
     printf("  UNDO <filename>          - Undo last change to file\n");
+    printf("  CREATEFOLDER <foldername> - Create a new folder\n");
+    printf("  MOVE <filename> <path>   - Move file to new location\n");
+    printf("  VIEWFOLDER <foldername>  - View contents of a folder\n");
+    printf("  CHECKPOINT <filename> <tag> - Create a checkpoint for a file\n");
+    printf("  VIEWCHECKPOINT <filename> <tag> - View a specific checkpoint\n");
+    printf("  REVERT <filename> <tag>  - Revert file to a checkpoint\n");
     printf("\n");
     printf("Access Control:\n");
     printf("  ADDACCESS -R <file> <user>  - Grant read access\n");
     printf("  ADDACCESS -W <file> <user>  - Grant write access\n");
     printf("  REMACCESS <file> <user>     - Remove user access\n");
+    printf("  REQUESTACCESS -R <file>     - Request read access\n");
+    printf("  REQUESTACCESS -W <file>     - Request write access\n");
+    printf("  VIEWREQUESTS                - View access requests\n");
+    printf("  APPROVEREQUEST <request_id> - Approve an access request\n");
+    printf("  REJECTREQUEST <request_id>  - Reject an access request\n");
     printf("\n");
     printf("Other:\n");
     printf("  LIST                     - List all users\n");
