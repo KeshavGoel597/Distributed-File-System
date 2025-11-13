@@ -218,11 +218,23 @@ int handle_write_request(int client_sockfd, Message *msg) {
     printf("[WRITE] Unlocked sentence %d in file '%s' for user '%s'\n", 
            msg->sentence_index, msg->filename, msg->username);
     
-    // If write didn't complete properly, return error
+    // If write didn't complete properly, rollback changes and return error
     if (!write_completed) {
-        fprintf(stderr, "[WRITE] Write operation incomplete - lock released\n");
+        fprintf(stderr, "[WRITE] Write operation incomplete - rolling back changes\n");
+        
+        // Rollback: restore from undo backup
+        if (undo_file_change_ll(msg->filename) == 0) {
+            printf("[WRITE] Successfully rolled back incomplete write\n");
+        } else {
+            fprintf(stderr, "[WRITE] Failed to rollback - undo backup may not exist\n");
+        }
+        
         return -1;
     }
+    
+    // Write completed successfully - NOW sync to disk
+    printf("[WRITE] ETIRW received - syncing changes to disk\n");
+    sync_file_to_disk(msg->filename);
     
     // Update file modified timestamp
     update_file_modified_time_ll(msg->filename);

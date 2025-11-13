@@ -77,8 +77,14 @@ int unlock_sentence_ll(const char *filename, int sentence_index, const char *use
 // Force unlock all sentences in a file (for cleanup/debugging)
 int force_unlock_all_sentences_ll(const char *filename);
 
-// Save in-memory linked list to disk (via swap file)
+// Sync file to disk
 int sync_file_to_disk(const char *filename);
+
+// Check if file has any locked sentences (for isolation)
+int file_has_locked_sentences(const char *filename);
+
+// Read file directly from disk (bypassing cache)
+int read_file_from_disk_ll(const char *filename, char *content, int max_size);
 
 // Undo last change to a file
 int undo_file_change_ll(const char *filename);

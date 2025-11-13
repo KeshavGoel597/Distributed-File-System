@@ -293,10 +293,10 @@ int write_to_file_ll(const char *filename, int sentence_index, int word_index,
     
     pthread_rwlock_unlock(&file->file_rwlock);
     
-    // Sync to disk
-    sync_file_to_disk(filename);
+    // NOTE: Do NOT sync to disk here - sync happens only after ETIRW
+    // This ensures atomicity: other clients don't see partial writes
     
-    printf("Write completed: %s at sentence %d, word %d\n", filename, sentence_index, word_index);
+    printf("Write completed in memory: %s at sentence %d, word %d\n", filename, sentence_index, word_index);
     return 0;
 }
 

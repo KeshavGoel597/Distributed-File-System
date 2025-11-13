@@ -468,6 +468,12 @@ int read_file_ll(const char *filename, char *content, int max_size) {
         return ERR_FILE_NOT_FOUND;
     }
     
+    // If any sentence is locked (write in progress), read from disk instead
+    if (file_has_locked_sentences(filename)) {
+        printf("[READ] File has locked sentences, reading from disk for isolation\n");
+        return read_file_from_disk_ll(filename, content, max_size);
+    }
+    
     pthread_rwlock_rdlock(&file->file_rwlock);
     
     content[0] = '\0';
@@ -504,6 +510,62 @@ int read_file_ll(const char *filename, char *content, int max_size) {
     }
     
     pthread_rwlock_unlock(&file->file_rwlock);
+    
+    // Update access time
+    FileMetadata *meta = find_metadata(filename);
+    if (meta != NULL) {
+        pthread_mutex_lock(&metadata_mutex);
+        get_timestamp(meta->accessed_time, sizeof(meta->accessed_time));
+        pthread_mutex_unlock(&metadata_mutex);
+    }
+    
+    return 0;
+}
+
+// Check if file has any locked sentences
+int file_has_locked_sentences(const char *filename) {
+    LoadedFile *file = get_file_from_cache(filename);
+    if (file == NULL) {
+        return 0; // File not loaded, no locks
+    }
+    
+    pthread_rwlock_rdlock(&file->file_rwlock);
+    
+    SentenceNode *sent = file->sentences_head;
+    while (sent != NULL) {
+        if (sent->is_locked) {
+            pthread_rwlock_unlock(&file->file_rwlock);
+            return 1; // Found a locked sentence
+        }
+        sent = sent->next;
+    }
+    
+    pthread_rwlock_unlock(&file->file_rwlock);
+    return 0; // No locked sentences
+}
+
+// Read file directly from disk (bypassing cache)
+int read_file_from_disk_ll(const char *filename, char *content, int max_size) {
+    char filepath[MAX_PATH];
+    get_file_path(filename, filepath, MAX_PATH);
+    
+    FILE *fp = fopen(filepath, "r");
+    if (fp == NULL) {
+        return ERR_FILE_NOT_FOUND;
+    }
+    
+    content[0] = '\0';
+    int remaining = max_size - 1;
+    int bytes_read = 0;
+    
+    char ch;
+    while ((ch = fgetc(fp)) != EOF && remaining > 0) {
+        content[bytes_read++] = ch;
+        remaining--;
+    }
+    content[bytes_read] = '\0';
+    
+    fclose(fp);
     
     // Update access time
     FileMetadata *meta = find_metadata(filename);
