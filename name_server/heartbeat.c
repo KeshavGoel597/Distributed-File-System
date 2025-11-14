@@ -110,6 +110,11 @@ void send_heartbeat_to_ss(int ss_id) {
             if (ss->status == SS_STATUS_OFFLINE) {
                 ss->status = ss->is_primary ? SS_STATUS_ONLINE : SS_STATUS_ONLINE;
                 printf("[Heartbeat] SS%d back online\n", ss_id);
+                
+                // Handle reconnection with enhanced fault tolerance
+                pthread_mutex_unlock(&ss->ss_mutex);
+                handle_ss_reconnection(ss_id);
+                return;  // Exit early since we unlocked the mutex
             }
         }
     }

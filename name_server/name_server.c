@@ -84,6 +84,13 @@ int init_name_server() {
     // Initialize hash table for efficient file search (O(1))
     init_file_hash_table();
     
+    // Initialize enhanced fault tolerance system
+    if (initialize_replication_system() < 0) {
+        printf("Error: Failed to initialize fault tolerance system\n");
+        cleanup_name_server();
+        return -1;
+    }
+    
     // Create server socket
     nm_state->server_socket = create_socket();
     if (nm_state->server_socket < 0) {

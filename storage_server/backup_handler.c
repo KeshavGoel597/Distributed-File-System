@@ -959,3 +959,73 @@ void cleanup_backup_handler() {
     printf("[Backup Handler] Cleanup complete\n");
     pthread_mutex_unlock(&backup_mutex);
 }
+
+// ============================================================================
+// FAULT TOLERANCE FUNCTIONS
+// ============================================================================
+
+// Sync files between two storage servers (for recovery)
+// ============================================================================
+// BULK SYNCHRONIZATION FOR RECOVERY
+// ============================================================================
+
+int perform_bulk_sync_to_backup() {
+    if (!server_config.is_primary || server_config.backup_sockfd < 0) {
+        printf("[Bulk Sync] Not a primary server or backup not connected\n");
+        return -1;
+    }
+    
+    printf("[Bulk Sync] Starting bulk synchronization to backup server\n");
+    
+    // First sync metadata
+    if (replicate_metadata() < 0) {
+        printf("[Bulk Sync] Metadata sync failed\n");
+        return -1;
+    }
+    
+    // Get list of all files and sync them
+    char file_list[MAX_DATA_SIZE];
+    if (get_file_list_ll(file_list, MAX_DATA_SIZE) < 0) {
+        printf("[Bulk Sync] Failed to get file list\n");
+        return -1;
+    }
+    
+    // Parse file list and sync each file
+    char *file = strtok(file_list, "\n");
+    int files_synced = 0;
+    
+    while (file != NULL) {
+        if (strlen(file) > 0) {
+            printf("[Bulk Sync] Syncing file: %s\n", file);
+            
+            if (send_file_to_backup(file) < 0) {
+                printf("[Bulk Sync] Failed to sync file: %s\n", file);
+                // Continue with other files
+            } else {
+                files_synced++;
+            }
+        }
+        file = strtok(NULL, "\n");
+    }
+    
+    // Send sync complete message
+    Message complete_msg = {0};
+    complete_msg.msg_type = MSG_REQUEST;
+    complete_msg.operation = OP_BACKUP_SYNC_COMPLETE;
+    complete_msg.ss_id = server_config.ss_id;
+    
+    if (send_message(server_config.backup_sockfd, &complete_msg) < 0) {
+        printf("[Bulk Sync] Failed to send sync complete message\n");
+        return -1;
+    }
+    
+    // Wait for acknowledgment
+    Message response = {0};
+    if (receive_message(server_config.backup_sockfd, &response) < 0) {
+        printf("[Bulk Sync] Failed to receive sync complete acknowledgment\n");
+        return -1;
+    }
+    
+    printf("[Bulk Sync] Bulk synchronization completed: %d files synced\n", files_synced);
+    return 0;
+}

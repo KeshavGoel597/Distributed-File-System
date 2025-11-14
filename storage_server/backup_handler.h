@@ -117,6 +117,12 @@ int handle_nm_backup_info(const char *backup_ip, int backup_port);
 int perform_bulk_sync();
 
 /**
+ * Perform bulk synchronization to backup server for recovery
+ * Enhanced version that handles recovery scenarios
+ */
+int perform_bulk_sync_to_backup();
+
+/**
  * Request recovery sync from backup server (primary SS that was offline)
  * This is called when a primary server comes back online after failure
  * It requests all files from its backup to catch up on changes

@@ -281,6 +281,9 @@ void handle_create_file(int socket, Message *msg) {
     if (ss_response.error_code == ERR_SUCCESS) {
         printf("[File Creation] File '%s' created successfully on SS%d\n", msg->filename, primary_ss_id);
         log_operation("FILE_CREATE", msg->filename);
+        
+        // Trigger asynchronous replication to backup server
+        replicate_all_writes_async(msg->filename, "CREATE", msg->username);
     } else {
         printf("[File Creation] File '%s' creation failed on SS%d: %s\n", 
                msg->filename, primary_ss_id, ss_response.data);
@@ -374,6 +377,9 @@ void handle_delete_file(int socket, Message *msg) {
         remove_file_from_server(primary_ss_id, msg->filename);
         printf("[File Deletion] File '%s' deleted successfully from SS%d\n", msg->filename, primary_ss_id);
         log_operation("FILE_DELETE", msg->filename);
+        
+        // Trigger asynchronous replication of deletion to backup server
+        replicate_all_writes_async(msg->filename, "DELETE", "");
     } else {
         printf("[File Deletion] File '%s' deletion failed on SS%d: %s\n", 
                msg->filename, primary_ss_id, ss_response.data);
@@ -1602,8 +1608,8 @@ void handle_revert(int socket, Message *msg) {
     if (receive_message(ss_socket, &ss_response) < 0 || ss_response.msg_type == MSG_ERROR) {
         close_socket(ss_socket);
         response.msg_type = MSG_ERROR;
-        response.error_code = ss_response.error_code;
-        strcpy(response.data, ss_response.data);
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server failed to revert file");
         send_message(socket, &response);
         return;
     }
@@ -1955,6 +1961,8 @@ void handle_rejectrequest(int socket, Message *msg) {
         send_message(socket, &response);
         return;
     }
+    
+   
     
     // Verify ownership
     if (strcmp(req->owner, msg->username) != 0) {

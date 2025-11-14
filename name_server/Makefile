@@ -7,7 +7,7 @@ TARGET = name_server
 COMMON_DIR = ../common
 
 # Source files
-SOURCES = name_server.c ss_manager.c client_handler.c heartbeat.c
+SOURCES = name_server.c ss_manager.c client_handler.c heartbeat.c fault_tolerance.c
 COMMON_SOURCES = $(COMMON_DIR)/network_utils.c
 
 # Object files

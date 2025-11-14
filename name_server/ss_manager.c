@@ -306,6 +306,9 @@ void setup_backup_pairing(int primary_ss_id) {
         pthread_mutex_unlock(&backup_ss->ss_mutex);
         pthread_mutex_unlock(&primary_ss->ss_mutex);
         
+        // Create enhanced replication pair
+        create_replication_pair(primary_ss_id, backup_ss_id);
+        
         printf("[Backup Pairing] SS%d (primary) paired with SS%d (backup)\n", 
                primary_ss_id, backup_ss_id);
     }

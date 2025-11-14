@@ -19,6 +19,13 @@
 #define SS_STATUS_ONLINE 1
 #define SS_STATUS_OFFLINE 0
 #define SS_STATUS_ACTING_PRIMARY 2
+#define SS_STATUS_RECOVERING 3    // New status for servers coming back online
+#define SS_STATUS_SYNCING 4       // New status for servers being synchronized
+
+// Enhanced replication states
+#define REPLICATION_STATUS_SYNCED 0
+#define REPLICATION_STATUS_OUT_OF_SYNC 1
+#define REPLICATION_STATUS_FAILED 2
 
 // File Information Structure
 typedef struct {
@@ -78,6 +85,27 @@ typedef struct {
     pthread_mutex_t hash_mutex;  // Protects hash table operations
 } FileHashTable;
 
+// Recovery and synchronization tracking
+typedef struct {
+    int ss_id;
+    time_t failure_time;
+    time_t recovery_start_time;
+    int sync_progress;        // Percentage of files synchronized
+    int total_files_to_sync;
+    int files_synced;
+    int sync_complete;
+} SSRecoveryInfo;
+
+// Enhanced replication tracking per SS pair
+typedef struct {
+    int primary_ss_id;
+    int backup_ss_id;
+    int replication_status;   // REPLICATION_STATUS_*
+    time_t last_sync_time;
+    int failed_replications;  // Count of recent failures
+    int auto_failover_enabled;
+} ReplicationPairInfo;
+
 // Global Name Server State
 typedef struct {
     StorageServerInfo storage_servers[MAX_STORAGE_SERVERS];
@@ -96,6 +124,15 @@ typedef struct {
     
     int next_primary_ss;  // Round-robin for file assignment
     pthread_mutex_t assignment_mutex;
+    
+    // Enhanced fault tolerance tracking
+    ReplicationPairInfo replication_pairs[MAX_STORAGE_SERVERS];
+    int replication_pair_count;
+    pthread_mutex_t replication_mutex;
+    
+    SSRecoveryInfo recovery_sessions[MAX_STORAGE_SERVERS];
+    int active_recoveries;
+    pthread_mutex_t recovery_mutex;
     
     int server_socket;
     int running;
@@ -165,6 +202,25 @@ void handle_rejectrequest(int socket, Message *msg);
 void* heartbeat_monitor(void* arg);
 void send_heartbeat_to_ss(int ss_id);
 int is_storage_server_alive(int ss_id);
+
+// Enhanced fault tolerance functions
+int initialize_replication_system();
+int create_replication_pair(int primary_ss_id, int backup_ss_id);
+int handle_ss_reconnection(int ss_id);
+int start_ss_recovery_sync(int recovering_ss_id, int partner_ss_id);
+int monitor_replication_health();
+int perform_emergency_failover(int failed_ss_id);
+int synchronize_ss_after_recovery(int recovering_ss_id);
+int replicate_all_writes_async(const char *filename, const char *operation, const char *data);
+int validate_data_consistency(int primary_ss_id, int backup_ss_id);
+void update_replication_status(int primary_ss_id, int backup_ss_id, int status);
+void* replication_monitor_thread(void* arg);
+
+// Recovery and synchronization functions
+void* ss_recovery_manager(void* arg);
+int sync_metadata_between_ss(int source_ss_id, int target_ss_id);
+int sync_files_between_ss(int source_ss_id, int target_ss_id);
+int verify_sync_completion(int ss_id);
 
 // Utility functions
 void print_server_status();

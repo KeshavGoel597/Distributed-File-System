@@ -519,6 +519,62 @@ void* handle_nm_connection(void *arg) {
             break;
         }
         
+        case OP_BACKUP_INIT_SYNC: {
+            printf("[NM Handler] BACKUP_INIT_SYNC request from NM\n");
+            
+            // This is a request to perform bulk synchronization to backup server
+            // The backup server ID is in ss_id field
+            int target_ss_id = request.ss_id;
+            
+            if (server_config.is_primary && server_config.backup_sockfd > 0) {
+                printf("[Recovery] Starting bulk sync to backup SS%d\n", target_ss_id);
+                
+                // Send all files to backup server
+                if (perform_bulk_sync_to_backup() < 0) {
+                    response.error_code = ERR_SERVER_ERROR;
+                    strcpy(response.data, "Bulk sync failed");
+                } else {
+                    response.error_code = ERR_SUCCESS;
+                    strcpy(response.data, "Bulk sync completed successfully");
+                }
+            } else {
+                response.error_code = ERR_INVALID_OPERATION;
+                strcpy(response.data, "Not a primary server or backup not connected");
+            }
+            break;
+        }
+        
+        case OP_BACKUP_METADATA: {
+            printf("[NM Handler] BACKUP_METADATA request from NM\n");
+            
+            // This is a request to sync metadata to backup server
+            if (server_config.is_primary) {
+                // Enqueue metadata replication
+                enqueue_replication_task(REP_OP_METADATA, "", NULL);
+                response.error_code = ERR_SUCCESS;
+                strcpy(response.data, "Metadata sync initiated");
+            } else {
+                response.error_code = ERR_INVALID_OPERATION;
+                strcpy(response.data, "Not a primary server");
+            }
+            break;
+        }
+        
+        case OP_BACKUP_SYNC: {
+            printf("[NM Handler] BACKUP_SYNC request for file: %s\n", request.filename);
+            
+            // This is a request to sync a specific file to backup server
+            if (server_config.is_primary) {
+                enqueue_replication_task(REP_OP_SYNC, request.filename, NULL);
+                response.error_code = ERR_SUCCESS;
+                strcpy(response.data, "File sync initiated");
+            } else {
+                response.error_code = ERR_INVALID_OPERATION;
+                strcpy(response.data, "Not a primary server");
+            }
+            break;
+        }
+        
         default:
             printf("[NM Handler] Unknown operation: %d\n", request.operation);
             response.error_code = ERR_INVALID_OPERATION;
