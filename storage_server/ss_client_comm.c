@@ -1,7 +1,4 @@
-#include "ss_client_comm.h"
-#include "storage_server.h"
-#include "file_handler_ll.h"
-#include "backup_handler.h"
+#include "storage_server_all.h"
 #include "../common/network_utils.h"
 #include <stdio.h>
 #include <stdlib.h>
