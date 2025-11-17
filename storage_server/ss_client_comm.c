@@ -120,9 +120,6 @@ int handle_read_request(int client_sockfd, Message *msg) {
         return -1;
     }
     
-    // Update accessed time when file is read
-    update_file_accessed_time_ll(msg->filename, msg->username);
-    
     // CRITICAL FIX: Implement chunked transfer for large files
     // Get file path and size
     char filepath[MAX_PATH];
@@ -240,8 +237,8 @@ int handle_write_request(int client_sockfd, Message *msg) {
     
     // CRITICAL: Check file size to prevent memory exhaustion
     // WRITE uses in-memory linked lists, so we must limit file size
-    char filepath[512];
-    snprintf(filepath, sizeof(filepath), "%s/%s", server_config.storage_dir, msg->filename);
+    char filepath[MAX_PATH];
+    get_file_path(msg->filename, filepath, MAX_PATH);
     
     struct stat file_stat;
     if (stat(filepath, &file_stat) == 0) {
@@ -289,6 +286,14 @@ int handle_write_request(int client_sockfd, Message *msg) {
     
     // Save backup for undo before making changes
     save_undo_backup_ll(msg->filename);
+    
+    // CRITICAL FIX: Replicate undo backup to backup server immediately
+    // This ensures UNDO will work even if primary server crashes
+    // Must be done BEFORE allowing any write operations to maintain consistency
+    if (server_config.is_primary || server_config.is_acting_primary) {
+        enqueue_replication_task(REP_OP_UNDO_BACKUP, msg->filename, NULL);
+        printf("[WRITE] Enqueued undo backup replication for '%s'\n", msg->filename);
+    }
     
     // Receive write commands until ETIRW
     int write_completed = 0;

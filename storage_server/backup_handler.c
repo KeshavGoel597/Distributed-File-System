@@ -100,7 +100,8 @@ int enqueue_replication_task(ReplicationOpType op_type, const char *filename, co
     printf("[Async Replication] Enqueued %s for file '%s' (queue size: %d)\n",
            op_type == REP_OP_CREATE ? "CREATE" :
            op_type == REP_OP_DELETE ? "DELETE" :
-           op_type == REP_OP_SYNC ? "SYNC" : "METADATA",
+           op_type == REP_OP_SYNC ? "SYNC" :
+           op_type == REP_OP_UNDO_BACKUP ? "UNDO_BACKUP" : "METADATA",
            filename, replication_queue.count);
     
     return 0;  // Return immediately without waiting for ACK
@@ -137,7 +138,8 @@ void* async_replication_worker(void *arg) {
         printf("[Async Replication] Processing task: %s for '%s'\n",
                task.op_type == REP_OP_CREATE ? "CREATE" :
                task.op_type == REP_OP_DELETE ? "DELETE" :
-               task.op_type == REP_OP_SYNC ? "SYNC" : "METADATA",
+               task.op_type == REP_OP_SYNC ? "SYNC" :
+               task.op_type == REP_OP_UNDO_BACKUP ? "UNDO_BACKUP" : "METADATA",
                task.filename);
         
         switch (task.op_type) {
@@ -152,6 +154,9 @@ void* async_replication_worker(void *arg) {
                 break;
             case REP_OP_METADATA:
                 replicate_metadata();
+                break;
+            case REP_OP_UNDO_BACKUP:
+                replicate_undo_backup(task.filename);
                 break;
         }
     }
@@ -335,6 +340,129 @@ int replicate_sync(const char *filename) {
     return result;
 }
 
+// Replicate undo backup file to backup server
+// CRITICAL FIX: Ensures UNDO works even after server failover
+int replicate_undo_backup(const char *filename) {
+    if (!server_config.is_primary || server_config.backup_sockfd < 0) {
+        return 0;
+    }
+    
+    printf("[Backup Handler] Replicating UNDO backup for file: %s\n", filename);
+    
+    pthread_mutex_lock(&backup_mutex);
+    
+    // Build undo file path
+    char undo_filepath[MAX_PATH];
+    snprintf(undo_filepath, MAX_PATH, "%s/undo/%s", server_config.storage_dir, filename);
+    
+    // Check if undo file exists
+    FILE *undo_file = fopen(undo_filepath, "r");
+    if (undo_file == NULL) {
+        fprintf(stderr, "[Backup Handler] Undo file not found: %s\n", undo_filepath);
+        pthread_mutex_unlock(&backup_mutex);
+        return -1;
+    }
+    fclose(undo_file);
+    
+    // Send undo backup operation message
+    Message msg;
+    memset(&msg, 0, sizeof(Message));
+    msg.msg_type = MSG_REQUEST;
+    msg.operation = OP_BACKUP_UNDO_FILE;
+    strncpy(msg.filename, filename, MAX_FILENAME - 1);
+    
+    if (send_message(server_config.backup_sockfd, &msg) < 0) {
+        fprintf(stderr, "[Backup Handler] Failed to send UNDO backup request\n");
+        pthread_mutex_unlock(&backup_mutex);
+        return -1;
+    }
+    
+    // Send the undo file content
+    int result = send_undo_file_to_backup(filename);
+    
+    // Wait for acknowledgment
+    Message response;
+    if (receive_message(server_config.backup_sockfd, &response) < 0) {
+        fprintf(stderr, "[Backup Handler] Failed to receive ACK for undo backup\n");
+        pthread_mutex_unlock(&backup_mutex);
+        return -1;
+    }
+    
+    if (response.error_code != ERR_SUCCESS) {
+        fprintf(stderr, "[Backup Handler] Backup server reported error for undo file\n");
+        pthread_mutex_unlock(&backup_mutex);
+        return -1;
+    }
+    
+    printf("[Backup Handler] Undo backup replicated successfully for '%s'\n", filename);
+    pthread_mutex_unlock(&backup_mutex);
+    
+    return result;
+}
+
+// Send undo file content to backup server
+int send_undo_file_to_backup(const char *filename) {
+    char undo_filepath[MAX_PATH];
+    snprintf(undo_filepath, MAX_PATH, "%s/undo/%s", server_config.storage_dir, filename);
+    
+    // Open undo file
+    FILE *file = fopen(undo_filepath, "r");
+    if (file == NULL) {
+        fprintf(stderr, "[Backup Handler] Failed to open undo file: %s\n", undo_filepath);
+        return -1;
+    }
+    
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    // Send file size first
+    Message size_msg;
+    memset(&size_msg, 0, sizeof(Message));
+    size_msg.msg_type = MSG_RESPONSE;
+    size_msg.operation = OP_BACKUP_UNDO_FILE;
+    snprintf(size_msg.data, MAX_DATA_SIZE, "%ld", file_size);
+    
+    if (send_message(server_config.backup_sockfd, &size_msg) < 0) {
+        fprintf(stderr, "[Backup Handler] Failed to send undo file size\n");
+        fclose(file);
+        return -1;
+    }
+    
+    // Send file content in chunks
+    char buffer[MAX_DATA_SIZE];
+    size_t bytes_sent = 0;
+    
+    while (bytes_sent < (size_t)file_size) {
+        size_t to_read = (file_size - bytes_sent > MAX_DATA_SIZE - 100) ? 
+                         MAX_DATA_SIZE - 100 : file_size - bytes_sent;
+        
+        size_t bytes_read = fread(buffer, 1, to_read, file);
+        if (bytes_read == 0) break;
+        
+        Message chunk_msg;
+        memset(&chunk_msg, 0, sizeof(Message));
+        chunk_msg.msg_type = MSG_RESPONSE;
+        chunk_msg.operation = OP_BACKUP_UNDO_FILE;
+        memcpy(chunk_msg.data, buffer, bytes_read);
+        chunk_msg.sentence_index = bytes_read; // Use this field for chunk size
+        
+        if (send_message(server_config.backup_sockfd, &chunk_msg) < 0) {
+            fprintf(stderr, "[Backup Handler] Failed to send undo file chunk\n");
+            fclose(file);
+            return -1;
+        }
+        
+        bytes_sent += bytes_read;
+    }
+    
+    fclose(file);
+    printf("[Backup Handler] Sent undo backup: %zu bytes\n", bytes_sent);
+    
+    return 0;
+}
+
 // Send file content to backup server
 int send_file_to_backup(const char *filename) {
     char filepath[MAX_PATH];
@@ -445,6 +573,74 @@ int receive_file_from_primary(const char *filename, const char *owner) {
     return 0;
 }
 
+// Receive undo file content from primary server
+int receive_undo_file_from_primary(const char *filename) {
+    char undo_filepath[MAX_PATH];
+    snprintf(undo_filepath, MAX_PATH, "%s/undo/%s", server_config.storage_dir, filename);
+    
+    // Create undo directory if needed (for nested folders)
+    char undo_dir_path[MAX_PATH];
+    strncpy(undo_dir_path, undo_filepath, MAX_PATH - 1);
+    char *last_slash = strrchr(undo_dir_path, '/');
+    if (last_slash != NULL) {
+        *last_slash = '\0';  // Truncate to get directory path
+        // Create directory recursively
+        char temp_path[MAX_PATH];
+        char *p = undo_dir_path;
+        
+        // Skip leading slash if present
+        if (*p == '/') p++;
+        
+        for (char *ptr = p; *ptr; ptr++) {
+            if (*ptr == '/') {
+                *ptr = '\0';
+                snprintf(temp_path, MAX_PATH, "%s", undo_dir_path);
+                mkdir(temp_path, 0755);
+                *ptr = '/';
+            }
+        }
+        mkdir(undo_dir_path, 0755);
+    }
+    
+    // Receive file size
+    Message size_msg;
+    if (receive_message(server_config.backup_sockfd, &size_msg) < 0) {
+        fprintf(stderr, "[Backup Handler] Failed to receive undo file size\n");
+        return -1;
+    }
+    
+    long file_size = atol(size_msg.data);
+    printf("[Backup Handler] Receiving undo file of size: %ld bytes\n", file_size);
+    
+    // Open undo file for writing
+    FILE *file = fopen(undo_filepath, "w");
+    if (file == NULL) {
+        fprintf(stderr, "[Backup Handler] Failed to create undo backup file: %s\n", undo_filepath);
+        return -1;
+    }
+    
+    // Receive file content in chunks
+    size_t bytes_received = 0;
+    
+    while (bytes_received < (size_t)file_size) {
+        Message chunk_msg;
+        if (receive_message(server_config.backup_sockfd, &chunk_msg) < 0) {
+            fprintf(stderr, "[Backup Handler] Failed to receive undo file chunk\n");
+            fclose(file);
+            return -1;
+        }
+        
+        size_t chunk_size = chunk_msg.sentence_index;
+        fwrite(chunk_msg.data, 1, chunk_size, file);
+        bytes_received += chunk_size;
+    }
+    
+    fclose(file);
+    printf("[Backup Handler] Received undo backup: %zu bytes\n", bytes_received);
+    
+    return 0;
+}
+
 // Handle backup request from primary server
 int handle_backup_request(int sockfd) {
     Message request;
@@ -501,6 +697,23 @@ int handle_backup_request(int sockfd) {
             delete_file_ll(request.filename);
             receive_file_from_primary(request.filename, "system");
             
+            server_config.backup_sockfd = old_sockfd;
+            
+            // Send final ACK
+            response.msg_type = MSG_ACK;
+            response.error_code = ERR_SUCCESS;
+            send_message(sockfd, &response);
+            return 0;
+            
+        case OP_BACKUP_UNDO_FILE:
+            // Receive undo backup file from primary
+            printf("[Backup] Receiving undo backup for file: %s\n", request.filename);
+            send_message(sockfd, &response);
+            
+            // Receive undo file content
+            old_sockfd = server_config.backup_sockfd;
+            server_config.backup_sockfd = sockfd;
+            receive_undo_file_from_primary(request.filename);
             server_config.backup_sockfd = old_sockfd;
             
             // Send final ACK

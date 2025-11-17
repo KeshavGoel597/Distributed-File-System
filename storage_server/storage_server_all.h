@@ -100,7 +100,8 @@ typedef enum {
     REP_OP_CREATE,
     REP_OP_DELETE,
     REP_OP_SYNC,
-    REP_OP_METADATA
+    REP_OP_METADATA,
+    REP_OP_UNDO_BACKUP  // Replicate undo backup file
 } ReplicationOpType;
 
 typedef struct {
@@ -129,9 +130,12 @@ int connect_to_backup_server(const char *backup_ip, int backup_port);
 int replicate_create(const char *filename, const char *owner);
 int replicate_delete(const char *filename);
 int replicate_sync(const char *filename);
+int replicate_undo_backup(const char *filename);
 int handle_backup_request(int sockfd);
 int send_file_to_backup(const char *filename);
+int send_undo_file_to_backup(const char *filename);
 int receive_file_from_primary(const char *filename, const char *owner);
+int receive_undo_file_from_primary(const char *filename);
 int is_backup_available();
 int handle_nm_backup_info(const char *backup_ip, int backup_port);
 int perform_bulk_sync();

@@ -3,10 +3,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 // Forward declarations
 extern LoadedFile* get_file_from_cache(const char *filename);
 extern int sync_file_to_disk(const char *filename);
+extern int reload_file_from_disk(const char *filename);
 
 // Helper: Check if character is a sentence delimiter
 static int is_delimiter(char c) {
@@ -354,8 +358,11 @@ int undo_file_change_ll(const char *filename) {
     fclose(src);
     fclose(dst);
     
-    // Unload file from memory cache to force reload on next access
-    unload_file_from_memory(filename);
+    // CRITICAL FIX: After UNDO, reload the file from disk to keep cache consistent
+    // This safely replaces the old cached version with the restored content
+    if (reload_file_from_disk(filename) < 0) {
+        fprintf(stderr, "[UNDO] Warning: Failed to reload file '%s' after undo\n", filename);
+    }
     
     pthread_mutex_unlock(&undo_mutex);
     
@@ -374,11 +381,37 @@ int save_undo_backup_ll(const char *filename) {
     char undo_path[MAX_PATH];
     get_undo_path(filename, undo_path, MAX_PATH);
     
+    // CRITICAL FIX: Create parent directories for undo file if needed
+    // For files in folders like "myfolder/file.txt", we need "undo/myfolder/" to exist
+    char undo_dir_path[MAX_PATH];
+    strncpy(undo_dir_path, undo_path, MAX_PATH - 1);
+    char *last_slash = strrchr(undo_dir_path, '/');
+    if (last_slash != NULL) {
+        *last_slash = '\0';  // Truncate to get directory path
+        // Create directory recursively (mkdir -p behavior)
+        char temp_path[MAX_PATH];
+        char *p = undo_dir_path;
+        
+        // Skip leading slash if present
+        if (*p == '/') p++;
+        
+        for (char *ptr = p; *ptr; ptr++) {
+            if (*ptr == '/') {
+                *ptr = '\0';
+                snprintf(temp_path, MAX_PATH, "%s", undo_dir_path);
+                mkdir(temp_path, 0755);  // Ignore errors if already exists
+                *ptr = '/';
+            }
+        }
+        mkdir(undo_dir_path, 0755);  // Create final directory
+    }
+    
     pthread_rwlock_rdlock(&file->file_rwlock);
     
     FILE *fp = fopen(undo_path, "w");
     if (fp == NULL) {
         pthread_rwlock_unlock(&file->file_rwlock);
+        fprintf(stderr, "Failed to create undo backup at '%s': %s\n", undo_path, strerror(errno));
         return -1;
     }
     

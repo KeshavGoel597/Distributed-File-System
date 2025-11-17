@@ -398,12 +398,14 @@ void handle_storage_server_registration(int socket, Message *msg) {
                 recovery_cmd.operation = OP_RECOVERY_SYNC;
                 recovery_cmd.ss_id = backup_id;
                 strcpy(recovery_cmd.backup_ip, backup_ss->ip);
-                recovery_cmd.backup_port = backup_ss->nm_port;
+                // CRITICAL FIX: Use client_port, NOT nm_port for recovery sync
+                // Recovery sync is replication operation, uses client_port
+                recovery_cmd.backup_port = backup_ss->client_port;
                 
                 send_message(socket, &recovery_cmd);
                 
                 printf("[SS Recovery] Sent recovery sync command to SS%d: sync from SS%d at %s:%d\n",
-                       msg->ss_id, backup_id, backup_ss->ip, backup_ss->nm_port);
+                       msg->ss_id, backup_id, backup_ss->ip, backup_ss->client_port);
                 log_operation("RECOVERY_SYNC_CMD", "Commanded primary to sync from backup");
             }
             return; // Don't send backup info for normal pairing yet
@@ -425,7 +427,9 @@ void handle_storage_server_registration(int socket, Message *msg) {
                 backup_info.operation = OP_NM_BACKUP_INFO;
                 backup_info.ss_id = backup_ss_id;
                 strcpy(backup_info.backup_ip, backup_ss->ip);
-                backup_info.backup_port = backup_ss->nm_port;  // Use nm_port for replication (backup listens on nm_port)
+                // CRITICAL FIX: Use client_port, NOT nm_port for replication
+                // Backup server listens for replication on client_port (handles in handle_client_connection)
+                backup_info.backup_port = backup_ss->client_port;
                 
                 send_message(socket, &backup_info);
                 

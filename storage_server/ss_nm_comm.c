@@ -445,12 +445,9 @@ void* handle_nm_connection(void *arg) {
                 response.error_code = ERR_SUCCESS;
                 snprintf(response.data, MAX_DATA_SIZE, "File moved successfully");
                 
-                // Also move undo file if exists
-                char undo_src[MAX_PATH], undo_dst[MAX_PATH];
-                snprintf(undo_src, MAX_PATH, "%s/undo/%s.undo", server_config.storage_dir, request.filename);
-                snprintf(undo_dst, MAX_PATH, "%s/files/%s/%s.undo", 
-                         server_config.storage_dir, request.target_path, request.filename);
-                rename(undo_src, undo_dst);  // Ignore errors
+                // Note: The file has been physically moved in the filesystem
+                // The Name Server needs to update its file mapping to reflect new path
+                // Storage server doesn't maintain path mapping - that's NM's responsibility
             }
             break;
         }

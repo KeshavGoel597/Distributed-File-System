@@ -471,14 +471,15 @@ LoadedFile* get_file_from_cache(const char *filename) {
         current = current->next;
     }
     
-    // File not in cache, load it
+    // CRITICAL FIX: Keep mutex locked while loading to prevent race condition
+    // File not in cache, load it while holding the lock
     LoadedFile *loaded = load_file_into_memory(filename);
     if (loaded == NULL) {
         pthread_mutex_unlock(&file_cache_mutex);
         return NULL;
     }
     
-    // Add to cache (at head)
+    // Add to cache (at head) - still holding mutex
     loaded->next = file_cache_head;
     file_cache_head = loaded;
     
@@ -517,6 +518,51 @@ int unload_file_from_memory(const char *filename) {
     
     pthread_mutex_unlock(&file_cache_mutex);
     return -1;
+}
+
+// Reload file from disk (for UNDO operation)
+// This safely replaces the cached version with fresh content from disk
+int reload_file_from_disk(const char *filename) {
+    pthread_mutex_lock(&file_cache_mutex);
+    
+    // Find and remove old cached version
+    LoadedFile *current = file_cache_head;
+    LoadedFile *prev = NULL;
+    
+    while (current != NULL) {
+        if (strcmp(current->filename, filename) == 0) {
+            // Found it - remove from cache
+            if (prev == NULL) {
+                file_cache_head = current->next;
+            } else {
+                prev->next = current->next;
+            }
+            
+            // Free the old version
+            free_sentence_list(current->sentences_head);
+            pthread_rwlock_destroy(&current->file_rwlock);
+            free(current);
+            
+            printf("Removed old cached version of '%s'\n", filename);
+            break;
+        }
+        prev = current;
+        current = current->next;
+    }
+    
+    // Reload from disk
+    LoadedFile *reloaded = load_file_into_memory(filename);
+    if (reloaded != NULL) {
+        // Add to cache
+        reloaded->next = file_cache_head;
+        file_cache_head = reloaded;
+        printf("Reloaded file '%s' from disk\n", filename);
+        pthread_mutex_unlock(&file_cache_mutex);
+        return 0;
+    } else {
+        pthread_mutex_unlock(&file_cache_mutex);
+        return -1;
+    }
 }
 
 // Create a new file
@@ -578,8 +624,16 @@ int delete_file_ll(const char *filename) {
         return ERR_FILE_NOT_FOUND;
     }
     
-    // Unload from memory if loaded
-    unload_file_from_memory(filename);
+    // CRITICAL FIX: Do NOT forcibly unload from memory!
+    // If file is in use (someone has a pointer to it), forcibly freeing
+    // will cause use-after-free bugs and segfaults.
+    // Instead: Mark as deleted and let it be removed when no longer in use.
+    // For now, we simply don't unload - file will stay in memory but
+    // won't be accessible via disk operations.
+    // The memory will be reclaimed when server restarts or cache is cleared.
+    
+    // NOTE: In production, implement reference counting to properly handle this.
+    // For this project, the above approach is safer than use-after-free.
     
     // Delete the file from disk
     char filepath[MAX_PATH];
@@ -606,7 +660,7 @@ int delete_file_ll(const char *filename) {
     
     save_metadata_ll();
     
-    printf("File '%s' deleted\n", filename);
+    printf("File '%s' deleted from disk (memory cache not cleared for safety)\n", filename);
     return 0;
 }
 
@@ -742,6 +796,12 @@ static int write_linked_list_to_file(FILE *fp, SentenceNode *sentences_head) {
             first_word = 0;
             fprintf(fp, "%s", word->word);
             word = word->next;
+        }
+        
+        // CRITICAL FIX: Write the sentence delimiter if present
+        // Without this, delimiters are lost when syncing to disk
+        if (sent->delimiter != '\0') {
+            fprintf(fp, "%c", sent->delimiter);
         }
         
         // Add space after this sentence if there's a next sentence
@@ -1279,15 +1339,17 @@ int ensure_sentence_delimiter_ll(const char *filename, int sentence_index) {
         return ERR_SENTENCE_OUT_OF_RANGE;
     }
     
-    // If sentence doesn't have a delimiter, add newline
+    // CRITICAL FIX: If sentence doesn't have a delimiter, add period (not newline!)
+    // Valid delimiters are: '.' '!' '?'
     if (target_sent->delimiter == '\0') {
-        target_sent->delimiter = '\n';
-        printf("[File Handler] Added newline delimiter to sentence %d in file %s\n", 
+        target_sent->delimiter = '.';
+        printf("[File Handler] Added period delimiter to sentence %d in file %s\n", 
                sentence_index, filename);
     }
     
     pthread_rwlock_unlock(&file->file_rwlock);
-    sync_file_to_disk(filename);
+    
+    // Note: No need to sync to disk here - will be synced after ETIRW
     return 0;
 }
 

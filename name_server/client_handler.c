@@ -1364,8 +1364,28 @@ void handle_move_file(int socket, Message *msg) {
     
     close_socket(ss_socket);
     
+    // CRITICAL FIX: Update hash table AND file path
+    // After successful move, filename should be "foldername/filename"
+    char new_path[MAX_FILENAME];
+    snprintf(new_path, MAX_FILENAME, "%s/%s", msg->target_path, msg->filename);
+    
+    // Step 1: Remove OLD filename from hash table
+    hash_remove_file(msg->filename);
+    
+    // Step 2: Update the filename in the FileInfo structure
+    pthread_mutex_lock(&ss->ss_mutex);
+    strncpy(file->filename, new_path, MAX_FILENAME - 1);
+    file->filename[MAX_FILENAME - 1] = '\0';
+    pthread_mutex_unlock(&ss->ss_mutex);
+    
+    // Step 3: Insert NEW filename into hash table
+    hash_insert_file(file);
+    
+    // Step 4: Clear cache since file path has changed
+    cache_clear();
+    
     strcpy(response.data, "File moved successfully");
-    printf("[File Move] File '%s' moved successfully\n", msg->filename);
+    printf("[File Move] File '%s' moved to '%s' successfully\n", msg->filename, new_path);
     
     send_message(socket, &response);
     log_operation("MOVE", msg->filename);

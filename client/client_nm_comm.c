@@ -374,8 +374,6 @@ int send_exec_request(const char *filename) {
         return -1;
     }
     
-    close_socket(sockfd);
-    
     // Handle both small files (content in response.data) and large files (chunked)
     char *file_content = NULL;
     long file_size = response.sentence_index;
@@ -384,9 +382,44 @@ int send_exec_request(const char *filename) {
         // Small file - content is directly in response.data
         file_content = strdup(response.data);
     } else {
-        fprintf(stderr, "Error: File too large for EXEC operation (%ld bytes)\n", file_size);
-        return -1;
+        // CRITICAL FIX: Large file - receive chunks
+        printf("[EXEC] Receiving large file: %ld bytes\n", file_size);
+        
+        // Allocate buffer for entire file
+        file_content = (char*)malloc(file_size + 1);
+        if (!file_content) {
+            fprintf(stderr, "Error: Failed to allocate memory for file content\n");
+            close_socket(sockfd);
+            return -1;
+        }
+        
+        size_t total_received = 0;
+        
+        while (total_received < (size_t)file_size) {
+            Message chunk_msg;
+            if (receive_message(sockfd, &chunk_msg) < 0) {
+                fprintf(stderr, "Error: Failed to receive chunk\n");
+                free(file_content);
+                close_socket(sockfd);
+                return -1;
+            }
+            
+            if (chunk_msg.operation == OP_STOP) {
+                break;
+            }
+            
+            if (chunk_msg.operation == OP_READ_CHUNK) {
+                size_t chunk_size = chunk_msg.sentence_index;
+                memcpy(file_content + total_received, chunk_msg.data, chunk_size);
+                total_received += chunk_size;
+            }
+        }
+        
+        file_content[total_received] = '\0';
+        printf("[EXEC] Received %zu bytes\n", total_received);
     }
+    
+    close_socket(sockfd);
     
     if (!file_content) {
         fprintf(stderr, "Error: Failed to read file content\n");
