@@ -40,8 +40,8 @@ int send_view_request(int view_flags) {
         return -1;
     }
     
-    if (response.msg_type == MSG_ERROR) {
-        fprintf(stderr, "Error: %d\n", response.error_code);
+    if (response.msg_type == MSG_ERROR || response.error_code != ERR_SUCCESS) {
+        fprintf(stderr, "Error: %s\n", response.data);
         close_socket(sockfd);
         return -1;
     }
@@ -77,8 +77,8 @@ int send_list_request() {
         return -1;
     }
     
-    if (response.msg_type == MSG_ERROR) {
-        fprintf(stderr, "Error: %d\n", response.error_code);
+    if (response.msg_type == MSG_ERROR || response.error_code != ERR_SUCCESS) {
+        fprintf(stderr, "Error: %s\n", response.data);
         close_socket(sockfd);
         return -1;
     }
@@ -115,11 +115,11 @@ int send_info_request(const char *filename) {
         return -1;
     }
     
-    if (response.msg_type == MSG_ERROR) {
+    if (response.msg_type == MSG_ERROR || response.error_code != ERR_SUCCESS) {
         if (response.error_code == ERR_FILE_NOT_FOUND) {
             fprintf(stderr, "Error: File '%s' not found\n", filename);
         } else {
-            fprintf(stderr, "Error: %d\n", response.error_code);
+            fprintf(stderr, "Error: %s\n", response.data);
         }
         close_socket(sockfd);
         return -1;
@@ -167,13 +167,13 @@ int send_addaccess_request(const char *filename, const char *target_user, int ac
     printf("[DEBUG] ADDACCESS response received: msg_type=%d, error_code=%d\n", 
            response.msg_type, response.error_code);
     
-    if (response.msg_type == MSG_ERROR) {
+    if (response.msg_type == MSG_ERROR || response.error_code != ERR_SUCCESS) {
         if (response.error_code == ERR_NOT_OWNER) {
             fprintf(stderr, "Error: Only the owner can modify access\n");
         } else if (response.error_code == ERR_FILE_NOT_FOUND) {
             fprintf(stderr, "Error: File '%s' not found\n", filename);
         } else {
-            fprintf(stderr, "Error: %d\n", response.error_code);
+            fprintf(stderr, "Error: %s\n", response.data);
         }
         close_socket(sockfd);
         return -1;
@@ -219,13 +219,13 @@ int send_remaccess_request(const char *filename, const char *target_user) {
     printf("[DEBUG] REMACCESS response received: msg_type=%d, error_code=%d\n", 
            response.msg_type, response.error_code);
     
-    if (response.msg_type == MSG_ERROR) {
+    if (response.msg_type == MSG_ERROR || response.error_code != ERR_SUCCESS) {
         if (response.error_code == ERR_NOT_OWNER) {
             fprintf(stderr, "Error: Only the owner can modify access\n");
         } else if (response.error_code == ERR_FILE_NOT_FOUND) {
             fprintf(stderr, "Error: File '%s' not found\n", filename);
         } else {
-            fprintf(stderr, "Error: %d\n", response.error_code);
+            fprintf(stderr, "Error: %s\n", response.data);
         }
         close_socket(sockfd);
         return -1;
@@ -262,11 +262,11 @@ int send_create_request(const char *filename) {
         return -1;
     }
     
-    if (response.msg_type == MSG_ERROR) {
+    if (response.msg_type == MSG_ERROR || response.error_code !=ERR_SUCCESS) {
         if (response.error_code == ERR_FILE_EXISTS) {
             fprintf(stderr, "Error: File '%s' already exists\n", filename);
         } else {
-            fprintf(stderr, "Error: %d\n", response.error_code);
+            fprintf(stderr, "Error: %d\n", response.data);
         }
         close_socket(sockfd);
         return -1;
@@ -303,13 +303,13 @@ int send_delete_request(const char *filename) {
         return -1;
     }
     
-    if (response.msg_type == MSG_ERROR) {
+    if (response.msg_type == MSG_ERROR || response.error_code != ERR_SUCCESS) {
         if (response.error_code == ERR_FILE_NOT_FOUND) {
             fprintf(stderr, "Error: File '%s' not found\n", filename);
         } else if (response.error_code == ERR_NOT_OWNER) {
             fprintf(stderr, "Error: Only the owner can delete the file\n");
         } else {
-            fprintf(stderr, "Error: %d\n", response.error_code);
+            fprintf(stderr, "Error: %s\n", response.data);
         }
         close_socket(sockfd);
         return -1;
@@ -407,11 +407,11 @@ int get_ss_info(const char *filename, char *ss_ip, int *ss_port) {
         return -1;
     }
     
-    if (response.msg_type == MSG_ERROR) {
+    if (response.msg_type == MSG_ERROR || response.error_code != ERR_SUCCESS) {
         if (response.error_code == ERR_FILE_NOT_FOUND) {
             fprintf(stderr, "Error: File '%s' not found\n", filename);
         } else {
-            fprintf(stderr, "Error: %d\n", response.error_code);
+            fprintf(stderr, "Error: %s\n", response.data);
         }
         close_socket(sockfd);
         return -1;
@@ -450,11 +450,11 @@ int send_createfolder_request(const char *foldername) {
         return -1;
     }
     
-    if (response.msg_type == MSG_ERROR) {
+    if (response.msg_type == MSG_ERROR || response.error_code != ERR_SUCCESS) {
         if (response.error_code == ERR_FILE_EXISTS) {
             fprintf(stderr, "Error: Folder '%s' already exists\n", foldername);
         } else {
-            fprintf(stderr, "Error: %d\n", response.error_code);
+            fprintf(stderr, "Error: %s\n", response.data);
         }
         close_socket(sockfd);
         return -1;
@@ -662,7 +662,7 @@ int send_revert_request(const char *filename, const char *checkpoint_tag) {
         return -1;
     }
     
-    if (response.msg_type == MSG_ERROR) {
+    if (response.msg_type == MSG_ERROR ) {
         if (response.error_code == ERR_FILE_NOT_FOUND) {
             fprintf(stderr, "Error: Checkpoint '%s' not found for file '%s'\n", checkpoint_tag, filename);
         } else if (response.error_code == ERR_NO_WRITE_ACCESS) {

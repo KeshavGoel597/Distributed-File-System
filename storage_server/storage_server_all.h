@@ -98,6 +98,15 @@ int remove_user_access_ll(const char *filename, const char *username);
 int get_file_list_ll(char *file_list, int max_size);
 int save_undo_backup_ll(const char *filename);
 int ensure_sentence_delimiter_ll(const char *filename, int sentence_index);
+
+// Helper functions for write operations
+WordNode* create_word_node(const char *word);
+SentenceNode* create_sentence_node(char delimiter);
+
+// Global commit lock functions
+void lock_commit(void);
+void unlock_commit(void);
+
 int load_metadata_ll();
 int save_metadata_ll();
 int add_metadata_ll(FileMetadata *metadata);

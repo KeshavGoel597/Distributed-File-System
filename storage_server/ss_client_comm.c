@@ -65,24 +65,29 @@ void* handle_client_connection(void *arg) {
             response.msg_type = MSG_ACK;
             response.operation = OP_UNDO;
             
+            // CRITICAL: Acquire global commit lock to prevent race conditions
+            lock_commit();
+            
             int result = undo_file_change_ll(request.filename);
             if (result < 0) {
                 response.msg_type = MSG_ERROR;
-                response.error_code = ERR_SERVER_ERROR;
+                response.error_code = ERR_INVALID_OPERATION;
+                strcpy(response.data, "No undo history available. Perform a WRITE operation first.");
             } else {
                 response.error_code = ERR_SUCCESS;
+                strcpy(response.data, "Undo successful");
                 
                 // Update file statistics after UNDO
                 update_file_statistics_ll(request.filename);
                 
-                // CRITICAL FIX: Replicate restored file to backup server
-                // UNDO changes the file content, so backup must be synchronized
+                // Replicate restored file to backup server
                 if (server_config.is_primary || server_config.is_acting_primary) {
                     enqueue_replication_task(REP_OP_SYNC, request.filename, NULL);
                     printf("[UNDO] Enqueued async replication for '%s'\n", request.filename);
                 }
             }
             
+            unlock_commit();
             send_message(client_sockfd, &response);
             break;
         }
@@ -217,6 +222,18 @@ int handle_read_request(int client_sockfd, Message *msg) {
 }
 
 // Handle WRITE operation from client
+// Global mutex for commit operations to prevent race conditions
+static pthread_mutex_t commit_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Lock/unlock functions for commit serialization
+void lock_commit() {
+    pthread_mutex_lock(&commit_mutex);
+}
+
+void unlock_commit() {
+    pthread_mutex_unlock(&commit_mutex);
+}
+
 int handle_write_request(int client_sockfd, Message *msg) {
     printf("[WRITE] User '%s' writing to file: %s, sentence: %d\n", 
            msg->username, msg->filename, msg->sentence_index);
@@ -235,16 +252,13 @@ int handle_write_request(int client_sockfd, Message *msg) {
         return -1;
     }
     
-    // CRITICAL: Check file size to prevent memory exhaustion
-    // WRITE uses in-memory linked lists, so we must limit file size
     char filepath[MAX_PATH];
     get_file_path(msg->filename, filepath, MAX_PATH);
     
+    // Check file size for memory safety
     struct stat file_stat;
     if (stat(filepath, &file_stat) == 0) {
-        // File exists - check size (10MB limit for WRITE operations)
         #define MAX_WRITE_FILE_SIZE (10 * 1024 * 1024)  // 10MB
-        
         if (file_stat.st_size > MAX_WRITE_FILE_SIZE) {
             printf("[WRITE] File too large: %ld bytes (limit: %d bytes)\n", 
                    file_stat.st_size, MAX_WRITE_FILE_SIZE);
@@ -262,40 +276,70 @@ int handle_write_request(int client_sockfd, Message *msg) {
     if (lock_result != 0) {
         printf("[WRITE] Failed to lock sentence: error code %d\n", lock_result);
         response.msg_type = MSG_ERROR;
-        response.error_code = lock_result;  // Return the actual error code
+        response.error_code = lock_result;
         send_message(client_sockfd, &response);
         return -1;
     }
     
-    // Send acknowledgment that lock is acquired
-    response.error_code = ERR_SUCCESS;
-    strcpy(response.data, "LOCKED");
-    send_message(client_sockfd, &response);
-    printf("[WRITE] Sentence locked, waiting for write commands\n");
-    
-    // CRITICAL FIX: Ensure file is cached before creating undo backup
-    // get_file_from_cache() loads file from disk if not in memory
-    if (get_file_from_cache(msg->filename) == NULL) {
-        fprintf(stderr, "[WRITE] Failed to load file into cache for undo backup\n");
-        unlock_sentence_ll(msg->filename, msg->sentence_index, msg->username);
+    // Get the file and record original word count for conflict detection
+    LoadedFile* doc = get_file_from_cache(msg->filename);
+    if (!doc) {
         response.msg_type = MSG_ERROR;
-        response.error_code = ERR_SERVER_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        unlock_sentence_ll(msg->filename, msg->sentence_index, msg->username);
         send_message(client_sockfd, &response);
         return -1;
     }
+    
+    // Get target sentence and record original word count
+    SentenceNode* target_sent = doc->sentences_head;
+    int current_index = 0;
+    while (target_sent != NULL && current_index < msg->sentence_index) {
+        target_sent = target_sent->next;
+        current_index++;
+    }
+    
+    int original_word_count = 0;
+    if (target_sent) {
+        WordNode* word = target_sent->words_head;
+        while (word) {
+            original_word_count++;
+            word = word->next;
+        }
+    }
+    
+    file_release(doc);  // Release reference
+    
+    // Send acknowledgment that write mode is active
+    response.error_code = ERR_SUCCESS;
+    strcpy(response.data, "WRITE_MODE");
+    send_message(client_sockfd, &response);
+    printf("[WRITE] Write mode activated, original word count: %d\n", original_word_count);
     
     // Save backup for undo before making changes
     save_undo_backup_ll(msg->filename);
     
-    // CRITICAL FIX: Replicate undo backup to backup server immediately
-    // This ensures UNDO will work even if primary server crashes
-    // Must be done BEFORE allowing any write operations to maintain consistency
-    if (server_config.is_primary || server_config.is_acting_primary) {
-        enqueue_replication_task(REP_OP_UNDO_BACKUP, msg->filename, NULL);
-        printf("[WRITE] Enqueued undo backup replication for '%s'\n", msg->filename);
+    // Track edit operations during write session
+    typedef struct {
+        int word_index;
+        char word[256];
+    } EditOperation;
+    
+    int edit_capacity = 1000;
+    EditOperation* edit_ops = malloc(edit_capacity * sizeof(EditOperation));
+    int edit_count = 0;
+    int delimiter_index = -1;  // Track first delimiter position
+    
+    if (!edit_ops) {
+        unlock_sentence_ll(msg->filename, msg->sentence_index, msg->username);
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Memory allocation error");
+        send_message(client_sockfd, &response);
+        return -1;
     }
     
-    // Receive write commands until ETIRW
+    // Receive write operations until ETIRW
     int write_completed = 0;
     while (1) {
         Message write_cmd;
@@ -306,93 +350,261 @@ int handle_write_request(int client_sockfd, Message *msg) {
         
         // Check for end of write (ETIRW)
         if (strcmp(write_cmd.data, "ETIRW") == 0) {
-            printf("[WRITE] Received ETIRW, completing write operation\n");
-            
-            // Ensure sentence has a delimiter (add newline if missing)
-            ensure_sentence_delimiter_ll(msg->filename, msg->sentence_index);
-            
+            printf("[WRITE] Received ETIRW, beginning commit process\n");
             write_completed = 1;
             break;
         }
         
-        // Perform the write operation
-        int result = write_to_file_ll(msg->filename, msg->sentence_index, 
-                                   write_cmd.word_index, write_cmd.data, msg->username);
+        // Parse and validate write command
+        int base_word_idx = write_cmd.word_index;
+        char* content = write_cmd.data;
         
-        Message write_response;
-        memset(&write_response, 0, sizeof(Message));
-        write_response.msg_type = MSG_ACK;
-        write_response.operation = OP_WRITE;
+        // Split content by spaces
+        char content_copy[MAX_DATA_SIZE];
+        strncpy(content_copy, content, MAX_DATA_SIZE - 1);
+        content_copy[MAX_DATA_SIZE - 1] = '\0';
         
-        // CRITICAL FIX: Error codes are POSITIVE values (ERR_WORD_OUT_OF_RANGE = 1010)
-        // Check for specific error codes OR negative result (malloc failure)
-        if (result == ERR_SENTENCE_OUT_OF_RANGE || result == ERR_WORD_OUT_OF_RANGE) {
-            write_response.msg_type = MSG_ERROR;
-            write_response.error_code = result;
-        } else if (result < 0) {
-            // CRITICAL FIX: Server error (likely malloc failure)
-            // Linked list may be in partially modified state - abort and rollback
-            write_response.msg_type = MSG_ERROR;
-            write_response.error_code = ERR_SERVER_ERROR;
-            strcpy(write_response.data, "Write failed - operation aborted");
-            send_message(client_sockfd, &write_response);
+        // First pass: validate all words
+        char* validation_copy = strdup(content_copy);
+        char* token = strtok(validation_copy, " ");
+        int word_offset = 0;
+        int first_delimiter_in_batch = -1;
+        
+        while (token != NULL) {
+            int word_idx = base_word_idx + word_offset;
             
-            printf("[WRITE] Critical error in write_to_file_ll (possibly malloc failure)\n");
-            printf("[WRITE] Aborting write session and rolling back changes\n");
+            // Check if word has delimiter
+            int word_len = strlen(token);
+            if (word_len > 0) {
+                char last_char = token[word_len - 1];
+                if (last_char == '.' || last_char == '!' || last_char == '?') {
+                    if (first_delimiter_in_batch < 0) {
+                        first_delimiter_in_batch = word_idx;
+                    }
+                }
+            }
             
-            // Break out of loop to trigger rollback
-            write_completed = 0;
-            break;
-        } else {
-            write_response.error_code = ERR_SUCCESS;
+            // Check delimiter boundary enforcement
+            if (delimiter_index >= 0 && word_idx > delimiter_index) {
+                Message err_response = {0};
+                err_response.msg_type = MSG_ERROR;
+                err_response.error_code = ERR_WORD_OUT_OF_RANGE;
+                snprintf(err_response.data, MAX_DATA_SIZE, 
+                        "Index %d is beyond sentence delimiter at position %d", 
+                        word_idx, delimiter_index);
+                send_message(client_sockfd, &err_response);
+                free(validation_copy);
+                goto next_command;
+            }
+            
+            // CRITICAL FIX: Validate against sentence size (matching TinyOS logic EXACTLY)
+            // In TinyOS: expected_size = sentence->word_count + word_offset
+            // Since TinyOS updates sentence->word_count in real-time, we simulate this:
+            // effective_word_count = original + all previously queued edits + current batch progress
+            int effective_word_count = original_word_count + edit_count + word_offset;
+            
+            printf("[WRITE DEBUG] Validating word_idx=%d against effective_word_count=%d (original=%d + queued=%d + batch_progress=%d)\n",
+                   word_idx, effective_word_count, original_word_count, edit_count, word_offset);
+            
+            if (word_idx < 0 || word_idx > effective_word_count) {
+                Message err_response = {0};
+                err_response.msg_type = MSG_ERROR;
+                err_response.error_code = ERR_WORD_OUT_OF_RANGE;
+                snprintf(err_response.data, MAX_DATA_SIZE, 
+                        "Index %d out of range (valid: 0-%d)", 
+                        word_idx, effective_word_count);
+                send_message(client_sockfd, &err_response);
+                printf("[WRITE] VALIDATION FAILED: word_idx=%d > effective_word_count=%d\n",
+                       word_idx, effective_word_count);
+                free(validation_copy);
+                goto next_command;
+            }
+            
+            printf("[WRITE DEBUG] Validation PASSED for word_idx=%d\n", word_idx);
+            
+            token = strtok(NULL, " ");
+            word_offset++;
+        }
+        free(validation_copy);
+        
+        // Second pass: store edit operations
+        token = strtok(content_copy, " ");
+        word_offset = 0;
+        
+        while (token != NULL) {
+            int word_idx = base_word_idx + word_offset;
+            
+            // Expand array if needed
+            if (edit_count >= edit_capacity) {
+                edit_capacity *= 2;
+                EditOperation* new_ops = realloc(edit_ops, edit_capacity * sizeof(EditOperation));
+                if (!new_ops) {
+                    Message err_response = {0};
+                    err_response.msg_type = MSG_ERROR;
+                    err_response.error_code = ERR_SERVER_ERROR;
+                    strcpy(err_response.data, "Memory allocation error");
+                    send_message(client_sockfd, &err_response);
+                    free(edit_ops);
+                    unlock_sentence_ll(msg->filename, msg->sentence_index, msg->username);
+                    return -1;
+                }
+                edit_ops = new_ops;
+            }
+            
+            // Store the edit operation
+            edit_ops[edit_count].word_index = word_idx;
+            strncpy(edit_ops[edit_count].word, token, 255);
+            edit_ops[edit_count].word[255] = '\0';
+            edit_count++;
+            
+            // Update delimiter tracking
+            if (delimiter_index >= 0 && word_idx <= delimiter_index) {
+                delimiter_index++;
+            }
+            
+            token = strtok(NULL, " ");
+            word_offset++;
         }
         
-        // Send response (unless we broke above for critical error)
-        if (write_completed != 0 || result >= 0 || result == ERR_SENTENCE_OUT_OF_RANGE || result == ERR_WORD_OUT_OF_RANGE) {
-            send_message(client_sockfd, &write_response);
+        // Set delimiter index if found in this batch
+        if (first_delimiter_in_batch >= 0 && delimiter_index < 0) {
+            delimiter_index = first_delimiter_in_batch;
         }
+        
+        // Send acknowledgment
+        Message ack = {0};
+        ack.msg_type = MSG_ACK;
+        ack.operation = OP_WRITE;
+        ack.error_code = ERR_SUCCESS;
+        snprintf(ack.data, MAX_DATA_SIZE, "OK (%d operations queued, delimiter at %d)", 
+                edit_count, delimiter_index);
+        send_message(client_sockfd, &ack);
+        
+next_command:
+        continue;
     }
     
-    // Always unlock the sentence, even if write didn't complete
+    // Always unlock the sentence
     unlock_sentence_ll(msg->filename, msg->sentence_index, msg->username);
-    printf("[WRITE] Unlocked sentence %d in file '%s' for user '%s'\n", 
-           msg->sentence_index, msg->filename, msg->username);
     
-    // If write didn't complete properly, rollback changes and return error
+    // If write didn't complete, rollback and return error
     if (!write_completed) {
         fprintf(stderr, "[WRITE] Write operation incomplete - rolling back changes\n");
-        
-        // Rollback: restore from undo backup
-        if (undo_file_change_ll(msg->filename) == 0) {
-            printf("[WRITE] Successfully rolled back incomplete write\n");
-        } else {
-            fprintf(stderr, "[WRITE] Failed to rollback - undo backup may not exist\n");
-        }
-        
+        undo_file_change_ll(msg->filename);
+        free(edit_ops);
         return -1;
     }
     
-    // Write completed successfully - NOW sync to disk
-    printf("[WRITE] ETIRW received - syncing changes to disk\n");
-    sync_file_to_disk(msg->filename);
+    // Acquire global commit lock for atomic operation
+    lock_commit();
     
-    // CRITICAL FIX: Use consolidated metadata update to prevent race conditions
-    // Updates modified_time, file_size, word_count, char_count atomically
-    update_file_write_stats_ll(msg->filename);
-    
-    // Replicate changes to backup server asynchronously (non-blocking)
-    if (server_config.is_primary) {
-        enqueue_replication_task(REP_OP_SYNC, msg->filename, NULL);
-        printf("[WRITE] Enqueued async replication for '%s'\n", msg->filename);
+    // Re-read file for latest state before applying edits
+    doc = get_file_from_cache(msg->filename);
+    if (!doc) {
+        free(edit_ops);
+        unlock_commit();
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_FILE_NOT_FOUND;
+        send_message(client_sockfd, &response);
+        return -1;
     }
     
-    // Send final success response immediately (don't wait for backup ACK)
+    // Get fresh target sentence
+    target_sent = doc->sentences_head;
+    current_index = 0;
+    while (target_sent != NULL && current_index < msg->sentence_index) {
+        target_sent = target_sent->next;
+        current_index++;
+    }
+    
+    if (!target_sent && msg->sentence_index == doc->sentence_count) {
+        // Create new sentence if appending
+        target_sent = create_sentence_node('\0');
+        if (target_sent) {
+            if (doc->sentences_head == NULL) {
+                doc->sentences_head = target_sent;
+            } else {
+                SentenceNode* last = doc->sentences_head;
+                while (last->next) last = last->next;
+                last->next = target_sent;
+            }
+            doc->sentence_count++;
+        }
+    }
+    
+    if (!target_sent) {
+        free(edit_ops);
+        file_release(doc);
+        unlock_commit();
+        response.msg_type = MSG_ERROR;
+        response.error_code = ERR_SENTENCE_OUT_OF_RANGE;
+        send_message(client_sockfd, &response);
+        return -1;
+    }
+    
+    // Calculate word offset for conflict resolution
+    int current_word_count = 0;
+    WordNode* word = target_sent->words_head;
+    while (word) {
+        current_word_count++;
+        word = word->next;
+    }
+    
+    int word_offset = current_word_count - original_word_count;
+    printf("[WRITE] Applying %d edits with offset %d (original: %d, current: %d)\n", 
+           edit_count, word_offset, original_word_count, current_word_count);
+    
+    // Apply edit operations with conflict resolution
+    for (int i = 0; i < edit_count; i++) {
+        int original_idx = edit_ops[i].word_index;
+        int adjusted_idx = original_idx + word_offset;
+        
+        // Clamp to valid range
+        int current_count = 0;
+        word = target_sent->words_head;
+        while (word) {
+            current_count++;
+            word = word->next;
+        }
+        
+        if (adjusted_idx < 0) adjusted_idx = 0;
+        if (adjusted_idx > current_count) adjusted_idx = current_count;
+        
+        // Insert word at adjusted position
+        WordNode* new_word = create_word_node(edit_ops[i].word);
+        if (new_word) {
+            if (adjusted_idx == 0) {
+                new_word->next = target_sent->words_head;
+                target_sent->words_head = new_word;
+            } else {
+                WordNode* prev = target_sent->words_head;
+                for (int j = 1; j < adjusted_idx && prev && prev->next; j++) {
+                    prev = prev->next;
+                }
+                if (prev) {
+                    new_word->next = prev->next;
+                    prev->next = new_word;
+                }
+            }
+        }
+    }
+    
+    free(edit_ops);
+    file_release(doc);
+    
+    // Sync to disk
+    sync_file_to_disk(msg->filename);
+    update_file_write_stats_ll(msg->filename);
+    
+    unlock_commit();
+    
+    // Send final success response
     Message final_response;
     memset(&final_response, 0, sizeof(Message));
     final_response.msg_type = MSG_ACK;
     final_response.operation = OP_WRITE;
     final_response.error_code = ERR_SUCCESS;
-    strcpy(final_response.data, "Write Successful!");
+    strcpy(final_response.data, "Write completed successfully");
     send_message(client_sockfd, &final_response);
     
     printf("[WRITE] Write operation completed successfully\n");

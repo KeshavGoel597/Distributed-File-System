@@ -17,31 +17,6 @@ static int is_delimiter(char c) {
     return (c == '.' || c == '!' || c == '?');
 }
 
-// Helper: Create word node
-static WordNode* create_word_node(const char *word) {
-    WordNode *node = (WordNode*)malloc(sizeof(WordNode));
-    if (node == NULL) return NULL;
-    
-    strncpy(node->word, word, sizeof(node->word) - 1);
-    node->word[sizeof(node->word) - 1] = '\0';
-    node->next = NULL;
-    return node;
-}
-
-// Helper: Create sentence node
-static SentenceNode* create_sentence_node(char delimiter) {
-    SentenceNode *node = (SentenceNode*)malloc(sizeof(SentenceNode));
-    if (node == NULL) return NULL;
-    
-    node->words_head = NULL;
-    node->delimiter = delimiter;
-    pthread_mutex_init(&node->sentence_lock, NULL);
-    node->is_locked = 0;
-    memset(node->locked_by, 0, sizeof(node->locked_by));
-    node->next = NULL;
-    return node;
-}
-
 // Helper: Count words in a sentence
 static int count_words_in_sentence(SentenceNode *sent) {
     int count = 0;
@@ -256,6 +231,21 @@ int write_to_file_ll(const char *filename, int sentence_index, int word_index,
     // If first group has delimiter, update target sentence delimiter
     if (groups[0].delimiter != '\0') {
         target_sent->delimiter = groups[0].delimiter;
+        
+        // CRITICAL FIX: If we just added a delimiter to the target sentence,
+        // we need to create an empty trailing sentence (unless there are more groups)
+        if (group_count == 1) {
+            SentenceNode *empty_sent = create_sentence_node('\0');
+            if (empty_sent == NULL) {
+                fprintf(stderr, "[Write LL] CRITICAL: malloc failed for trailing empty sentence\n");
+                pthread_rwlock_unlock(&file->file_rwlock);
+                file_release(file);
+                return -1;
+            }
+            empty_sent->next = target_sent->next;
+            target_sent->next = empty_sent;
+            file->sentence_count++;
+        }
     }
     
     // If there are additional groups, create new sentences
