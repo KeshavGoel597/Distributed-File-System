@@ -114,113 +114,104 @@ void init_file_cache() {
            CACHE_SIZE, CACHE_TTL);
 }
 
-// Simple hash function for cache indexing
+// Hash function for cache indexing (djb2 algorithm)
 static unsigned int cache_hash(const char *filename) {
     unsigned long hash = 5381;
     int c;
     while ((c = *filename++)) {
-        hash = ((hash << 5) + hash) + c;
+        hash = ((hash << 5) + hash) + c;  // hash * 33 + c
     }
     return hash % CACHE_SIZE;
 }
 
-// Insert or update cache entry
-void cache_insert(const char *filename, int primary_ss_id, int backup_ss_id) {
+// Insert or update cache entry - O(1) hash-based
+void cache_insert(const char *filename, int ss_id) {
     pthread_mutex_lock(&nm_state->search_cache.cache_mutex);
     
-    // First, try to find if entry already exists
-    for (int i = 0; i < CACHE_SIZE; i++) {
-        if (nm_state->search_cache.entries[i].valid &&
-            strcmp(nm_state->search_cache.entries[i].filename, filename) == 0) {
-            // Update existing entry
-            nm_state->search_cache.entries[i].primary_ss_id = primary_ss_id;
-            nm_state->search_cache.entries[i].backup_ss_id = backup_ss_id;
-            nm_state->search_cache.entries[i].timestamp = time(NULL);
-            pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
-            printf("[Cache] Updated entry for '%s'\n", filename);
-            return;
-        }
+    // Calculate hash index for O(1) lookup
+    unsigned int hash_index = cache_hash(filename);
+    
+    // Check if entry at hash index matches (cache hit on same hash slot)
+    if (nm_state->search_cache.entries[hash_index].valid &&
+        strcmp(nm_state->search_cache.entries[hash_index].filename, filename) == 0) {
+        // Update existing entry at hash position
+        nm_state->search_cache.entries[hash_index].ss_id = ss_id;
+        nm_state->search_cache.entries[hash_index].timestamp = time(NULL);
+        pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
+        printf("[Cache] Updated entry for '%s' at hash index %u (SS%d)\n", 
+               filename, hash_index, ss_id);
+        return;
     }
     
-    // Find empty slot or use round-robin eviction
-    int index = -1;
-    for (int i = 0; i < CACHE_SIZE; i++) {
-        if (!nm_state->search_cache.entries[i].valid) {
-            index = i;
-            break;
-        }
-    }
-    
-    if (index == -1) {
-        // No empty slot, use round-robin eviction
-        index = nm_state->search_cache.next_evict_index;
-        nm_state->search_cache.next_evict_index = (index + 1) % CACHE_SIZE;
-    }
-    
-    // Insert new entry
-    strncpy(nm_state->search_cache.entries[index].filename, filename, MAX_FILENAME - 1);
-    nm_state->search_cache.entries[index].filename[MAX_FILENAME - 1] = '\0';
-    nm_state->search_cache.entries[index].primary_ss_id = primary_ss_id;
-    nm_state->search_cache.entries[index].backup_ss_id = backup_ss_id;
-    nm_state->search_cache.entries[index].timestamp = time(NULL);
-    nm_state->search_cache.entries[index].valid = 1;
+    // If hash slot is empty or has different file, use it (hash collision = evict old entry)
+    // This is acceptable for a cache - we trade collision handling for O(1) speed
+    strncpy(nm_state->search_cache.entries[hash_index].filename, filename, MAX_FILENAME - 1);
+    nm_state->search_cache.entries[hash_index].filename[MAX_FILENAME - 1] = '\0';
+    nm_state->search_cache.entries[hash_index].ss_id = ss_id;
+    nm_state->search_cache.entries[hash_index].timestamp = time(NULL);
+    nm_state->search_cache.entries[hash_index].valid = 1;
     
     pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
-    printf("[Cache] Inserted entry for '%s' at index %d (primary: SS%d, backup: SS%d)\n", 
-           filename, index, primary_ss_id, backup_ss_id);
+    printf("[Cache] Inserted entry for '%s' at hash index %u (SS%d)\n", 
+           filename, hash_index, ss_id);
 }
 
-// Lookup cache entry - returns 1 if found and valid, 0 otherwise
-int cache_lookup(const char *filename, int *primary_ss_id, int *backup_ss_id) {
+// Lookup cache entry - O(1) hash-based lookup
+int cache_lookup(const char *filename, int *ss_id) {
     pthread_mutex_lock(&nm_state->search_cache.cache_mutex);
     
+    // Calculate hash index for O(1) lookup
+    unsigned int hash_index = cache_hash(filename);
     time_t now = time(NULL);
     
-    for (int i = 0; i < CACHE_SIZE; i++) {
-        if (nm_state->search_cache.entries[i].valid &&
-            strcmp(nm_state->search_cache.entries[i].filename, filename) == 0) {
-            
-            // Check if entry is still valid (not expired)
-            if ((now - nm_state->search_cache.entries[i].timestamp) < CACHE_TTL) {
-                *primary_ss_id = nm_state->search_cache.entries[i].primary_ss_id;
-                *backup_ss_id = nm_state->search_cache.entries[i].backup_ss_id;
-                pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
-                printf("[Cache] HIT for '%s' (primary: SS%d, backup: SS%d)\n", 
-                       filename, *primary_ss_id, *backup_ss_id);
-                return 1;  // Cache hit
-            } else {
-                // Entry expired, invalidate it
-                nm_state->search_cache.entries[i].valid = 0;
-                pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
-                printf("[Cache] MISS for '%s' (expired entry)\n", filename);
-                return 0;  // Cache miss (expired)
-            }
+    // Direct hash-based lookup - O(1)
+    if (nm_state->search_cache.entries[hash_index].valid &&
+        strcmp(nm_state->search_cache.entries[hash_index].filename, filename) == 0) {
+        
+        // Check if entry is still valid (not expired)
+        if ((now - nm_state->search_cache.entries[hash_index].timestamp) < CACHE_TTL) {
+            *ss_id = nm_state->search_cache.entries[hash_index].ss_id;
+            pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
+            printf("[Cache] HIT for '%s' at hash index %u (SS%d)\n", 
+                   filename, hash_index, *ss_id);
+            return 1;  // Cache hit
+        } else {
+            // Entry expired, invalidate it
+            nm_state->search_cache.entries[hash_index].valid = 0;
+            pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
+            printf("[Cache] MISS for '%s' at hash index %u (expired entry)\n", 
+                   filename, hash_index);
+            return 0;  // Cache miss (expired)
         }
     }
     
     pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
-    printf("[Cache] MISS for '%s' (not found)\n", filename);
-    return 0;  // Cache miss (not found)
+    printf("[Cache] MISS for '%s' at hash index %u (not found or hash collision)\n", 
+           filename, hash_index);
+    return 0;  // Cache miss (not found or different file at this hash slot)
 }
 
-// Invalidate specific cache entry (e.g., when file is deleted or moved)
+// Invalidate specific cache entry - O(1) hash-based
 void cache_invalidate(const char *filename) {
     pthread_mutex_lock(&nm_state->search_cache.cache_mutex);
     
-    for (int i = 0; i < CACHE_SIZE; i++) {
-        if (nm_state->search_cache.entries[i].valid &&
-            strcmp(nm_state->search_cache.entries[i].filename, filename) == 0) {
-            nm_state->search_cache.entries[i].valid = 0;
-            pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
-            printf("[Cache] Invalidated entry for '%s'\n", filename);
-            return;
-        }
+    // Calculate hash index for O(1) lookup
+    unsigned int hash_index = cache_hash(filename);
+    
+    // Direct hash-based invalidation - O(1)
+    if (nm_state->search_cache.entries[hash_index].valid &&
+        strcmp(nm_state->search_cache.entries[hash_index].filename, filename) == 0) {
+        nm_state->search_cache.entries[hash_index].valid = 0;
+        pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
+        printf("[Cache] Invalidated entry for '%s' at hash index %u\n", filename, hash_index);
+        return;
     }
     
     pthread_mutex_unlock(&nm_state->search_cache.cache_mutex);
+    printf("[Cache] Entry for '%s' not found in cache (no invalidation needed)\n", filename);
 }
 
-// Clear entire cache (e.g., when SS fails or during recovery)
+// Clear entire cache (e.g., when SS status changes)
 void cache_clear() {
     pthread_mutex_lock(&nm_state->search_cache.cache_mutex);
     memset(&nm_state->search_cache.entries, 0, sizeof(nm_state->search_cache.entries));
@@ -244,45 +235,14 @@ int register_storage_server(Message *msg) {
         StorageServerInfo *ss = &nm_state->storage_servers[existing_index];
         
         pthread_mutex_lock(&ss->ss_mutex);
-        int was_offline = (ss->status == SS_STATUS_OFFLINE);
         strcpy(ss->ip, msg->ip);
         ss->nm_port = msg->port1;
         ss->client_port = msg->port2;
-        int is_primary_server = ss->is_primary;
-        int backup_id = ss->backup_ss_id;
+        ss->status = SS_STATUS_ONLINE;
+        pthread_mutex_unlock(&ss->ss_mutex);
         
-        // CRITICAL FIX: Check if backup is acting as primary
-        int backup_is_acting = 0;
-        if (was_offline && is_primary_server && backup_id > 0) {
-            int backup_index = find_storage_server(backup_id);
-            if (backup_index >= 0) {
-                StorageServerInfo *backup = &nm_state->storage_servers[backup_index];
-                pthread_mutex_lock(&backup->ss_mutex);
-                backup_is_acting = (backup->status == SS_STATUS_ACTING_PRIMARY);
-                pthread_mutex_unlock(&backup->ss_mutex);
-            }
-        }
-        
-        if (backup_is_acting) {
-            // Backup became primary during outage - mark recovering primary for sync
-            ss->status = SS_STATUS_RECOVERING;
-            ss->last_heartbeat = time(NULL);
-            pthread_mutex_unlock(&ss->ss_mutex);
-            
-            printf("[SS Registration] Primary SS%d reconnecting - backup SS%d is ACTING_PRIMARY\n", 
-                   msg->ss_id, backup_id);
-            printf("[SS Registration] Marking SS%d as RECOVERING, will request sync from backup\n", 
-                   msg->ss_id);
-            log_operation("SS_RECOVERY_START", "Primary server recovering, needs sync from backup");
-        } else {
-            // Normal reconnection - no sync needed
-            ss->status = SS_STATUS_ONLINE;
-            ss->last_heartbeat = time(NULL);
-            pthread_mutex_unlock(&ss->ss_mutex);
-            
-            printf("[SS Registration] Storage Server %d reconnected\n", msg->ss_id);
-            log_operation("SS_RECONNECT", msg->data);
-        }
+        printf("[SS Registration] Storage Server %d reconnected\n", msg->ss_id);
+        log_operation("SS_RECONNECT", msg->data);
     } else {
         // New server registration
         if (nm_state->ss_count >= MAX_STORAGE_SERVERS) {
@@ -299,16 +259,12 @@ int register_storage_server(Message *msg) {
         ss->nm_port = msg->port1;
         ss->client_port = msg->port2;
         ss->status = SS_STATUS_ONLINE;
-        ss->last_heartbeat = time(NULL);
         ss->file_count = 0;
-        ss->backup_ss_id = 0;
-        ss->is_primary = (msg->ss_id % 2 == 1) ? 1 : 0;  // Odd = primary, Even = backup
         pthread_mutex_unlock(&ss->ss_mutex);
         
         nm_state->ss_count++;
         
-        printf("[SS Registration] Storage Server %d registered as %s\n", 
-               msg->ss_id, ss->is_primary ? "PRIMARY" : "BACKUP");
+        printf("[SS Registration] Storage Server %d registered\n", msg->ss_id);
         
         // Parse file list from data field
         if (strlen(msg->data) > 0) {
@@ -328,8 +284,7 @@ int register_storage_server(Message *msg) {
                 
                 strcpy(ss->files[ss->file_count].filename, filename);
                 strcpy(ss->files[ss->file_count].owner, owner);
-                ss->files[ss->file_count].primary_ss_id = msg->ss_id;
-                ss->files[ss->file_count].backup_ss_id = 0;  // Will be set during pairing
+                ss->files[ss->file_count].ss_id = msg->ss_id;
                 ss->files[ss->file_count].created_time = time(NULL);
                 ss->files[ss->file_count].modified_time = time(NULL);
                 
@@ -346,12 +301,6 @@ int register_storage_server(Message *msg) {
         }
         
         log_operation("SS_REGISTER", msg->data);
-    }
-    
-    // Setup backup pairing if this is a primary server
-    StorageServerInfo *ss = &nm_state->storage_servers[existing_index >= 0 ? existing_index : nm_state->ss_count - 1];
-    if (ss->is_primary) {
-        setup_backup_pairing(msg->ss_id);
     }
     
     pthread_mutex_unlock(&nm_state->ss_list_mutex);
@@ -377,67 +326,6 @@ void handle_storage_server_registration(int socket, Message *msg) {
     }
     
     send_message(socket, &response);
-    
-    // CRITICAL FIX: Check if this server needs recovery sync
-    int ss_index = find_storage_server(msg->ss_id);
-    if (ss_index >= 0) {
-        StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
-        pthread_mutex_lock(&ss->ss_mutex);
-        int needs_recovery = (ss->status == SS_STATUS_RECOVERING);
-        int backup_id = ss->backup_ss_id;
-        pthread_mutex_unlock(&ss->ss_mutex);
-        
-        if (needs_recovery && backup_id > 0) {
-            // Send recovery sync command to primary
-            int backup_index = find_storage_server(backup_id);
-            if (backup_index >= 0) {
-                StorageServerInfo *backup_ss = &nm_state->storage_servers[backup_index];
-                
-                Message recovery_cmd = {0};
-                recovery_cmd.msg_type = MSG_REQUEST;
-                recovery_cmd.operation = OP_RECOVERY_SYNC;
-                recovery_cmd.ss_id = backup_id;
-                strcpy(recovery_cmd.backup_ip, backup_ss->ip);
-                // CRITICAL FIX: Use client_port, NOT nm_port for recovery sync
-                // Recovery sync is replication operation, uses client_port
-                recovery_cmd.backup_port = backup_ss->client_port;
-                
-                send_message(socket, &recovery_cmd);
-                
-                printf("[SS Recovery] Sent recovery sync command to SS%d: sync from SS%d at %s:%d\n",
-                       msg->ss_id, backup_id, backup_ss->ip, backup_ss->client_port);
-                log_operation("RECOVERY_SYNC_CMD", "Commanded primary to sync from backup");
-            }
-            return; // Don't send backup info for normal pairing yet
-        }
-    }
-    
-    // If this is a primary server and has a backup, send backup info
-    if (result == ERR_SUCCESS && (msg->ss_id % 2 == 1)) {  // Primary server
-        int backup_ss_id = msg->ss_id + 1;
-        int backup_index = find_storage_server(backup_ss_id);
-        
-        if (backup_index >= 0) {
-            StorageServerInfo *backup_ss = &nm_state->storage_servers[backup_index];
-            
-            if (backup_ss->status == SS_STATUS_ONLINE) {
-                // Send backup info to primary
-                Message backup_info = {0};
-                backup_info.msg_type = MSG_REQUEST;
-                backup_info.operation = OP_NM_BACKUP_INFO;
-                backup_info.ss_id = backup_ss_id;
-                strcpy(backup_info.backup_ip, backup_ss->ip);
-                // CRITICAL FIX: Use client_port, NOT nm_port for replication
-                // Backup server listens for replication on client_port (handles in handle_client_connection)
-                backup_info.backup_port = backup_ss->client_port;
-                
-                send_message(socket, &backup_info);
-                
-                printf("[Backup Pairing] Sent backup info to SS%d: backup is SS%d at %s:%d\n",
-                       msg->ss_id, backup_ss_id, backup_ss->ip, backup_ss->client_port);
-            }
-        }
-    }
 }
 
 int find_storage_server(int ss_id) {
@@ -449,39 +337,7 @@ int find_storage_server(int ss_id) {
     return -1;  // Not found
 }
 
-void setup_backup_pairing(int primary_ss_id) {
-    int backup_ss_id = primary_ss_id + 1;  // Backup is always primary + 1
-    
-    int primary_index = find_storage_server(primary_ss_id);
-    int backup_index = find_storage_server(backup_ss_id);
-    
-    if (primary_index >= 0 && backup_index >= 0) {
-        StorageServerInfo *primary_ss = &nm_state->storage_servers[primary_index];
-        StorageServerInfo *backup_ss = &nm_state->storage_servers[backup_index];
-        
-        pthread_mutex_lock(&primary_ss->ss_mutex);
-        pthread_mutex_lock(&backup_ss->ss_mutex);
-        
-        primary_ss->backup_ss_id = backup_ss_id;
-        backup_ss->backup_ss_id = primary_ss_id;  // Backup points to primary
-        
-        // Update file info to include backup
-        for (int i = 0; i < primary_ss->file_count; i++) {
-            primary_ss->files[i].backup_ss_id = backup_ss_id;
-        }
-        
-        pthread_mutex_unlock(&backup_ss->ss_mutex);
-        pthread_mutex_unlock(&primary_ss->ss_mutex);
-        
-        // Create enhanced replication pair
-        create_replication_pair(primary_ss_id, backup_ss_id);
-        
-        printf("[Backup Pairing] SS%d (primary) paired with SS%d (backup)\n", 
-               primary_ss_id, backup_ss_id);
-    }
-}
-
-int get_available_primary_server() {
+int get_available_storage_server() {
     pthread_mutex_lock(&nm_state->assignment_mutex);
     
     // CRITICAL FIX: Iterate through actual registered servers, not guessed IDs
@@ -494,22 +350,22 @@ int get_available_primary_server() {
     }
     
     // Round-robin assignment starting from last assigned index
-    int start_index = nm_state->next_primary_ss;
+    int start_index = nm_state->next_ss_index;
     int selected_ss = -1;
     
-    // Try each registered server, starting from next_primary_ss index
+    // Try each registered server, starting from next_ss_index
     for (int i = 0; i < nm_state->ss_count; i++) {
         int current_index = (start_index + i) % nm_state->ss_count;
         StorageServerInfo *ss = &nm_state->storage_servers[current_index];
         
         pthread_mutex_lock(&ss->ss_mutex);
         
-        // Check if this server is online and is a primary server
-        if (ss->status == SS_STATUS_ONLINE && ss->is_primary) {
+        // Check if this server is online
+        if (ss->status == SS_STATUS_ONLINE) {
             selected_ss = ss->ss_id;
             
-            // Update next_primary_ss to the next index for true round-robin
-            nm_state->next_primary_ss = (current_index + 1) % nm_state->ss_count;
+            // Update next_ss_index to the next index for true round-robin
+            nm_state->next_ss_index = (current_index + 1) % nm_state->ss_count;
             
             pthread_mutex_unlock(&ss->ss_mutex);
             break;
@@ -521,9 +377,9 @@ int get_available_primary_server() {
     pthread_mutex_unlock(&nm_state->assignment_mutex);
     
     if (selected_ss > 0) {
-        printf("[Load Balancing] Assigned primary server: SS%d\n", selected_ss);
+        printf("[Load Balancing] Assigned storage server: SS%d\n", selected_ss);
     } else {
-        printf("[Load Balancing] Error: No available primary servers\n");
+        printf("[Load Balancing] Error: No available storage servers\n");
     }
     
     return selected_ss;
@@ -556,8 +412,7 @@ int add_file_to_server(int ss_id, const char *filename, const char *owner) {
     FileInfo *file = &ss->files[ss->file_count];
     strcpy(file->filename, filename);
     strcpy(file->owner, owner);
-    file->primary_ss_id = ss_id;
-    file->backup_ss_id = ss->backup_ss_id;
+    file->ss_id = ss_id;
     file->created_time = time(NULL);
     file->modified_time = time(NULL);
     
@@ -609,63 +464,30 @@ FileInfo* find_file(const char *filename) {
     return hash_find_file(filename);
 }
 
-int find_primary_for_file(const char *filename) {
-    FileInfo *file = find_file(filename);
-    if (file) {
-        return file->primary_ss_id;
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+void print_server_status() {
+    printf("\n=== Name Server Status ===\n");
+    printf("Storage Servers: %d\n", nm_state->ss_count);
+    printf("Clients: %d\n", nm_state->client_count);
+    
+    for (int i = 0; i < nm_state->ss_count; i++) {
+        StorageServerInfo *ss = &nm_state->storage_servers[i];
+        pthread_mutex_lock(&ss->ss_mutex);
+        printf("  SS%d: %s:%d (status: %s, files: %d)\n",
+               ss->ss_id, ss->ip, ss->client_port,
+               ss->status == SS_STATUS_ONLINE ? "ONLINE" : "OFFLINE",
+               ss->file_count);
+        pthread_mutex_unlock(&ss->ss_mutex);
     }
-    return -1;
+    printf("========================\n\n");
 }
 
-// CRITICAL FIX: Handle recovery sync completion
-void handle_recovery_sync_complete(int ss_id) {
-    printf("[Recovery Sync] SS%d has completed recovery sync from backup\n", ss_id);
-    
-    pthread_mutex_lock(&nm_state->ss_list_mutex);
-    
-    int ss_index = find_storage_server(ss_id);
-    if (ss_index < 0) {
-        pthread_mutex_unlock(&nm_state->ss_list_mutex);
-        return;
-    }
-    
-    StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
-    pthread_mutex_lock(&ss->ss_mutex);
-    
-    if (ss->status != SS_STATUS_RECOVERING) {
-        printf("[Recovery Sync] Warning: SS%d is not in RECOVERING state\n", ss_id);
-        pthread_mutex_unlock(&ss->ss_mutex);
-        pthread_mutex_unlock(&nm_state->ss_list_mutex);
-        return;
-    }
-    
-    // Mark primary as ONLINE now that sync is complete
-    ss->status = SS_STATUS_ONLINE;
-    int backup_id = ss->backup_ss_id;
-    pthread_mutex_unlock(&ss->ss_mutex);
-    
-    // Demote backup from ACTING_PRIMARY back to normal backup
-    if (backup_id > 0) {
-        int backup_index = find_storage_server(backup_id);
-        if (backup_index >= 0) {
-            StorageServerInfo *backup = &nm_state->storage_servers[backup_index];
-            pthread_mutex_lock(&backup->ss_mutex);
-            
-            if (backup->status == SS_STATUS_ACTING_PRIMARY) {
-                backup->status = SS_STATUS_ONLINE;
-                printf("[Recovery Sync] Demoted backup SS%d from ACTING_PRIMARY to ONLINE\n", backup_id);
-            }
-            
-            pthread_mutex_unlock(&backup->ss_mutex);
-        }
-    }
-    
-    pthread_mutex_unlock(&nm_state->ss_list_mutex);
-    
-    printf("[Recovery Sync] SS%d is now ONLINE and ready to serve requests\n", ss_id);
-    log_operation("RECOVERY_SYNC_COMPLETE", "Primary server recovery complete, restored to service");
-    
-    // Clear cache to force fresh lookups
-    cache_clear();
-    print_server_status();
+void log_operation(const char *operation, const char *details) {
+    time_t now = time(NULL);
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", localtime(&now));
+    printf("[LOG] %s - %s: %s\n", timestamp, operation, details);
 }

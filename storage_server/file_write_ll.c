@@ -51,6 +51,18 @@ typedef struct {
     char delimiter;        // Delimiter at end of this group
 } WordGroup;
 
+// Helper: Check if content looks like a shell script (no punctuation delimiters)
+static int is_shell_script_content(const char *content) {
+    const char *p = content;
+    while (*p) {
+        if (is_delimiter(*p)) {
+            return 0; // Found punctuation, not a shell script
+        }
+        p++;
+    }
+    return 1; // No punctuation found, likely a shell script
+}
+
 static int split_content_into_groups(const char *content, WordGroup *groups, int max_groups) {
     int group_count = 0;
     groups[group_count].word_count = 0;
@@ -61,9 +73,27 @@ static int split_content_into_groups(const char *content, WordGroup *groups, int
     const char *p = content;
     
     while (*p && group_count < max_groups) {
-        // Skip whitespace
-        while (*p && isspace(*p)) p++;
+        // EXEC FIX: Check for newline as implicit sentence delimiter
+        if (*p == '\n') {
+            // End current group if it has words
+            if (groups[group_count].word_count > 0) {
+                // Mark this as end of sentence (newline acts as implicit delimiter)
+                groups[group_count].delimiter = '\n';
+                group_count++;
+                if (group_count >= max_groups) break;
+                groups[group_count].word_count = 0;
+                groups[group_count].delimiter = '\0';
+            }
+            p++;
+            continue;
+        }
+        
+        // Skip whitespace (but not newlines, handled above)
+        while (*p && isspace(*p) && *p != '\n') p++;
         if (!*p) break;
+        
+        // Check for newline again after skipping spaces
+        if (*p == '\n') continue;
         
         // Read word
         word_idx = 0;
@@ -184,6 +214,92 @@ int write_to_file_ll(const char *filename, int sentence_index, int word_index,
         pthread_rwlock_unlock(&file->file_rwlock);
         file_release(file);  // CRITICAL FIX: Release reference
         return ERR_WORD_OUT_OF_RANGE;
+    }
+    
+    // EXEC FIX: Special handling for shell script content
+    // If content has no punctuation and no quotes, split by spaces to create multiple sentences
+    // Each top-level token becomes a separate command line
+    int is_script = is_shell_script_content(content);
+    int has_quotes = (strchr(content, '"') != NULL || strchr(content, '\'') != NULL);
+    
+    if (is_script && !has_quotes && word_index == 0 && target_sent->words_head == NULL) {
+        printf("[EXEC Mode] Creating separate sentences for each command\n");
+        
+        // Count tokens first
+        char *test_copy = strdup(content);
+        if (!test_copy) {
+            pthread_rwlock_unlock(&file->file_rwlock);
+            file_release(file);
+            return -1;
+        }
+        
+        int token_count = 0;
+        char *test_token = strtok(test_copy, " \t");
+        while (test_token != NULL) {
+            token_count++;
+            test_token = strtok(NULL, " \t");
+        }
+        free(test_copy);
+        
+        // If multiple tokens, split them into separate sentences
+        if (token_count > 1) {
+            char *content_copy = strdup(content);
+            if (!content_copy) {
+                pthread_rwlock_unlock(&file->file_rwlock);
+                file_release(file);
+                return -1;
+            }
+            
+            SentenceNode *current_sent = target_sent;
+            SentenceNode *last_created = NULL;
+            char *token = strtok(content_copy, " \t");
+            int count = 0;
+            
+            while (token != NULL) {
+                // Create word node for this token (entire command)
+                WordNode *word_node = create_word_node(token);
+                if (!word_node) {
+                    free(content_copy);
+                    pthread_rwlock_unlock(&file->file_rwlock);
+                    file_release(file);
+                    return -1;
+                }
+                
+                // Set as the only word in this sentence
+                current_sent->words_head = word_node;
+                word_node->next = NULL;
+                last_created = current_sent;
+                count++;
+                
+                // Get next token
+                token = strtok(NULL, " \t");
+                
+                // If there are more tokens, create next sentence
+                if (token != NULL) {
+                    SentenceNode *next_sent = create_sentence_node('\0');
+                    if (!next_sent) {
+                        free(content_copy);
+                        pthread_rwlock_unlock(&file->file_rwlock);
+                        file_release(file);
+                        return -1;
+                    }
+                    
+                    // Link sentences properly
+                    SentenceNode *remaining = current_sent->next;
+                    current_sent->next = next_sent;
+                    next_sent->next = remaining;
+                    
+                    file->sentence_count++;
+                    current_sent = next_sent;
+                }
+            }
+            
+            printf("[EXEC Mode] Created %d separate command sentences\n", count);
+            free(content_copy);
+            pthread_rwlock_unlock(&file->file_rwlock);
+            file_release(file);
+            return 0;
+        }
     }
     
     // Parse content into word groups (may contain multiple sentences)

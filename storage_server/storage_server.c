@@ -21,9 +21,6 @@
 // Global server configuration
 SSConfig server_config;
 
-// Global replication queue for asynchronous backups
-ReplicationQueue replication_queue;
-
 // Global flag to control server running state
 volatile sig_atomic_t server_running = 1;
 
@@ -107,18 +104,6 @@ int init_storage_server(int nm_port, int client_port, const char *storage_dir, c
     // Load existing metadata
     if (load_metadata_ll() < 0) {
         fprintf(stderr, "Warning: Could not load metadata (might be first run)\n");
-    }
-    
-    // Initialize backup handler
-    if (init_backup_handler() < 0) {
-        fprintf(stderr, "Warning: Could not initialize backup handler\n");
-    }
-    
-    // Initialize asynchronous replication (for primary servers)
-    if (server_config.is_primary) {
-        if (init_async_replication() < 0) {
-            fprintf(stderr, "Warning: Could not initialize async replication\n");
-        }
     }
     
     printf("Storage Server initialized successfully\n");
@@ -284,9 +269,6 @@ void shutdown_server() {
         server_config.client_sockfd = -1;
     }
     
-    // Cleanup backup handler
-    cleanup_backup_handler();
-    
     // Cleanup file handler (frees all in-memory structures)
     cleanup_file_handler_ll();
     
@@ -373,10 +355,6 @@ int main(int argc, char *argv[]) {
     
     // Determine if this is a primary or backup server
     server_config.ss_id = ss_id;
-    server_config.is_primary = (ss_id % 2 == 1);  // Odd = primary, Even = backup
-    server_config.is_acting_primary = 0;  // Initially false
-    server_config.backup_sockfd = -1;     // Not connected yet
-    server_config.bulk_sync_complete = 0; // No sync yet
     
     // Register signal handlers
     signal(SIGINT, signal_handler);

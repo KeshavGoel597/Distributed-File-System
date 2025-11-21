@@ -82,20 +82,20 @@ void handle_get_ss_info(int socket, Message *msg) {
            msg->username, msg->filename);
     
     // Try cache first for O(1) lookup
-    int cached_primary_ss_id, cached_backup_ss_id;
-    if (cache_lookup(msg->filename, &cached_primary_ss_id, &cached_backup_ss_id)) {
+    int cached_ss_id;
+    if (cache_lookup(msg->filename, &cached_ss_id)) {
         // Cache hit! Use cached values
         printf("[File Location] Cache HIT - Using cached location\n");
         
         // Verify the server is still online
-        int ss_index = find_storage_server(cached_primary_ss_id);
-        if (ss_index >= 0 && nm_state->storage_servers[ss_index].status != SS_STATUS_OFFLINE) {
+        int ss_index = find_storage_server(cached_ss_id);
+        if (ss_index >= 0 && nm_state->storage_servers[ss_index].status == SS_STATUS_ONLINE) {
             // Send cached info
             Message response = {0};
             response.msg_type = MSG_RESPONSE;
             response.operation = OP_GET_SS_INFO;
             response.error_code = ERR_SUCCESS;
-            response.ss_id = cached_primary_ss_id;
+            response.ss_id = cached_ss_id;
             strcpy(response.ip, nm_state->storage_servers[ss_index].ip);
             response.port1 = nm_state->storage_servers[ss_index].client_port;
             send_message(socket, &response);
@@ -121,20 +121,19 @@ void handle_get_ss_info(int socket, Message *msg) {
         return;
     }
     
-    printf("[File Location] File found: primary_ss_id=%d, backup_ss_id=%d, owner=%s\n",
-           file->primary_ss_id, file->backup_ss_id, file->owner);
+    printf("[File Location] File found: ss_id=%d, owner=%s\n",
+           file->ss_id, file->owner);
     
     // Update cache with current location
-    cache_insert(msg->filename, file->primary_ss_id, file->backup_ss_id);
+    cache_insert(msg->filename, file->ss_id);
     
-    // Find the appropriate server (primary or acting backup)
-    int target_ss_id = file->primary_ss_id;
-    int ss_index = find_storage_server(target_ss_id);
+    // Find the storage server
+    int ss_index = find_storage_server(file->ss_id);
     
     if (ss_index < 0) {
         response.error_code = ERR_SERVER_ERROR;
         strcpy(response.data, "Storage server not found");
-        printf("[File Location] Primary server SS%d not found (ss_index=%d)\n", target_ss_id, ss_index);
+        printf("[File Location] Storage server SS%d not found\n", file->ss_id);
         send_message(socket, &response);
         return;
     }
@@ -145,69 +144,28 @@ void handle_get_ss_info(int socket, Message *msg) {
     
     pthread_mutex_lock(&ss->ss_mutex);
     
-    // Check if primary server is online
+    // Check if server is online
     if (ss->status != SS_STATUS_ONLINE) {
-        // Primary is down, try backup
-        int backup_ss_id = file->backup_ss_id;
+        response.error_code = ERR_SERVER_ERROR;
+        strcpy(response.data, "Storage server is offline");
+        printf("[File Location] Storage server SS%d is offline\n", file->ss_id);
         pthread_mutex_unlock(&ss->ss_mutex);
-        
-        if (backup_ss_id > 0) {
-            int backup_index = find_storage_server(backup_ss_id);
-            if (backup_index >= 0) {
-                StorageServerInfo *backup_ss = &nm_state->storage_servers[backup_index];
-                
-                pthread_mutex_lock(&backup_ss->ss_mutex);
-                if (backup_ss->status == SS_STATUS_ONLINE || backup_ss->status == SS_STATUS_ACTING_PRIMARY) {
-                    // Use backup server
-                    target_ss_id = backup_ss_id;
-                    strcpy(response.ip, backup_ss->ip);
-                    response.port1 = backup_ss->client_port;
-                    response.error_code = ERR_SUCCESS;
-                    
-                    // Promote backup to acting primary if not already
-                    if (backup_ss->status == SS_STATUS_ONLINE) {
-                        backup_ss->status = SS_STATUS_ACTING_PRIMARY;
-                        printf("[Failover] SS%d promoted to acting primary for failed SS%d\n", 
-                               backup_ss_id, file->primary_ss_id);
-                    }
-                    
-                    printf("[File Location] Redirected '%s' to backup server SS%d at %s:%d\n", 
-                           msg->filename, backup_ss_id, backup_ss->ip, backup_ss->client_port);
-                } else {
-                    response.error_code = ERR_SERVER_ERROR;
-                    strcpy(response.data, "Both primary and backup servers are down");
-                    printf("[File Location] Both primary SS%d and backup SS%d are down\n", 
-                           file->primary_ss_id, backup_ss_id);
-                }
-                pthread_mutex_unlock(&backup_ss->ss_mutex);
-            } else {
-                response.error_code = ERR_SERVER_ERROR;
-                strcpy(response.data, "Backup server not found");
-                printf("[File Location] Backup server SS%d not found\n", backup_ss_id);
-            }
-        } else {
-            response.error_code = ERR_SERVER_ERROR;
-            strcpy(response.data, "Primary server down and no backup available");
-            printf("[File Location] Primary SS%d down and no backup configured\n", file->primary_ss_id);
-        }
     } else {
-        // Primary server is online
+        // Server is online
         strcpy(response.ip, ss->ip);
         response.port1 = ss->client_port;
         response.error_code = ERR_SUCCESS;
+        response.ss_id = file->ss_id;
         
-        printf("[File Location] Primary server online. IP=%s, client_port=%d\n", 
+        printf("[File Location] Server online. IP=%s, client_port=%d\n", 
                ss->ip, ss->client_port);
-        printf("[File Location] File '%s' located on primary server SS%d at %s:%d\n", 
-               msg->filename, target_ss_id, ss->ip, ss->client_port);
+        printf("[File Location] File '%s' located on server SS%d at %s:%d\n", 
+               msg->filename, file->ss_id, ss->ip, ss->client_port);
         
         pthread_mutex_unlock(&ss->ss_mutex);
-    }
-    
-    if (response.error_code == ERR_SUCCESS) {
-        response.ss_id = target_ss_id;
+        
         snprintf(response.data, sizeof(response.data), 
-                "File located on SS%d at %s:%d", target_ss_id, response.ip, response.port1);
+                "File located on SS%d at %s:%d", file->ss_id, response.ip, response.port1);
         printf("[File Location] Sending response: ip=%s, port=%d, ss_id=%d\n",
                response.ip, response.port1, response.ss_id);
     }
@@ -233,9 +191,9 @@ void handle_create_file(int socket, Message *msg) {
         return;
     }
     
-    // Get available primary server
-    int primary_ss_id = get_available_primary_server();
-    if (primary_ss_id < 0) {
+    // Get available storage server
+    int ss_id = get_available_storage_server();
+    if (ss_id < 0) {
         response.error_code = ERR_SERVER_ERROR;
         strcpy(response.data, "No available storage servers");
         printf("[File Creation] No available storage servers\n");
@@ -244,27 +202,27 @@ void handle_create_file(int socket, Message *msg) {
     }
     
     // Add file to server's file list
-    int result = add_file_to_server(primary_ss_id, msg->filename, msg->username);
+    int result = add_file_to_server(ss_id, msg->filename, msg->username);
     if (result != ERR_SUCCESS) {
         response.error_code = result;
         strcpy(response.data, "Failed to register file with storage server");
-        printf("[File Creation] Failed to register file '%s' with SS%d\n", msg->filename, primary_ss_id);
+        printf("[File Creation] Failed to register file '%s' with SS%d\n", msg->filename, ss_id);
         send_message(socket, &response);
         return;
     }
     
     // Send create command to storage server
-    int ss_index = find_storage_server(primary_ss_id);
+    int ss_index = find_storage_server(ss_id);
     StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
     
     int ss_socket = connect_to_server(ss->ip, ss->nm_port);
     if (ss_socket < 0) {
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to connect to storage server");
-        printf("[File Creation] Failed to connect to SS%d\n", primary_ss_id);
+        printf("[File Creation] Failed to connect to SS%d\n", ss_id);
         
         // Remove file from our records since SS connection failed
-        remove_file_from_server(primary_ss_id, msg->filename);
+        remove_file_from_server(ss_id, msg->filename);
         send_message(socket, &response);
         return;
     }
@@ -280,10 +238,10 @@ void handle_create_file(int socket, Message *msg) {
     if (send_message(ss_socket, &ss_msg) < 0) {
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to send command to storage server");
-        printf("[File Creation] Failed to send CREATE command to SS%d\n", primary_ss_id);
+        printf("[File Creation] Failed to send CREATE command to SS%d\n", ss_id);
         
         close(ss_socket);
-        remove_file_from_server(primary_ss_id, msg->filename);
+        remove_file_from_server(ss_id, msg->filename);
         send_message(socket, &response);
         return;
     }
@@ -293,10 +251,10 @@ void handle_create_file(int socket, Message *msg) {
     if (receive_message(ss_socket, &ss_response) < 0) {
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to receive response from storage server");
-        printf("[File Creation] Failed to receive response from SS%d\n", primary_ss_id);
+        printf("[File Creation] Failed to receive response from SS%d\n", ss_id);
         
         close(ss_socket);
-        remove_file_from_server(primary_ss_id, msg->filename);
+        remove_file_from_server(ss_id, msg->filename);
         send_message(socket, &response);
         return;
     }
@@ -308,15 +266,12 @@ void handle_create_file(int socket, Message *msg) {
     strcpy(response.data, ss_response.data);
     
     if (ss_response.error_code == ERR_SUCCESS) {
-        printf("[File Creation] File '%s' created successfully on SS%d\n", msg->filename, primary_ss_id);
+        printf("[File Creation] File '%s' created successfully on SS%d\n", msg->filename, ss_id);
         log_operation("FILE_CREATE", msg->filename);
-        
-        // Trigger asynchronous replication to backup server
-        replicate_all_writes_async(msg->filename, "CREATE", msg->username);
     } else {
         printf("[File Creation] File '%s' creation failed on SS%d: %s\n", 
-               msg->filename, primary_ss_id, ss_response.data);
-        remove_file_from_server(primary_ss_id, msg->filename);
+               msg->filename, ss_id, ss_response.data);
+        remove_file_from_server(ss_id, msg->filename);
     }
     
     send_message(socket, &response);
@@ -355,8 +310,8 @@ void handle_delete_file(int socket, Message *msg) {
     printf("[File Deletion] Ownership check passed\n");
     
     // Send delete command to storage server
-    int primary_ss_id = file->primary_ss_id;
-    int ss_index = find_storage_server(primary_ss_id);
+    int ss_id = file->ss_id;
+    int ss_index = find_storage_server(ss_id);
     StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
     
     int ss_socket = connect_to_server(ss->ip, ss->nm_port);
@@ -364,7 +319,7 @@ void handle_delete_file(int socket, Message *msg) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to connect to storage server");
-        printf("[File Deletion] Failed to connect to SS%d\n", primary_ss_id);
+        printf("[File Deletion] Failed to connect to SS%d\n", ss_id);
         send_message(socket, &response);
         return;
     }
@@ -381,7 +336,7 @@ void handle_delete_file(int socket, Message *msg) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to send command to storage server");
-        printf("[File Deletion] Failed to send DELETE command to SS%d\n", primary_ss_id);
+        printf("[File Deletion] Failed to send DELETE command to SS%d\n", ss_id);
         close(ss_socket);
         send_message(socket, &response);
         return;
@@ -393,7 +348,7 @@ void handle_delete_file(int socket, Message *msg) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to receive response from storage server");
-        printf("[File Deletion] Failed to receive response from SS%d\n", primary_ss_id);
+        printf("[File Deletion] Failed to receive response from SS%d\n", ss_id);
         close(ss_socket);
         send_message(socket, &response);
         return;
@@ -403,19 +358,16 @@ void handle_delete_file(int socket, Message *msg) {
     
     // If storage server deletion was successful, remove from our records
     if (ss_response.error_code == ERR_SUCCESS) {
-        remove_file_from_server(primary_ss_id, msg->filename);
+        remove_file_from_server(ss_id, msg->filename);
         
         // Invalidate cache entry for deleted file
         cache_invalidate(msg->filename);
         
-        printf("[File Deletion] File '%s' deleted successfully from SS%d\n", msg->filename, primary_ss_id);
+        printf("[File Deletion] File '%s' deleted successfully from SS%d\n", msg->filename, ss_id);
         log_operation("FILE_DELETE", msg->filename);
-        
-        // Trigger asynchronous replication of deletion to backup server
-        replicate_all_writes_async(msg->filename, "DELETE", "");
     } else {
         printf("[File Deletion] File '%s' deletion failed on SS%d: %s\n", 
-               msg->filename, primary_ss_id, ss_response.data);
+               msg->filename, ss_id, ss_response.data);
     }
     
     // Forward storage server response to client
@@ -494,12 +446,12 @@ void handle_addaccess(int socket, Message *msg) {
     }
     
     // Forward to storage server
-    int primary_ss_id = file->primary_ss_id;
-    int ss_index = find_storage_server(primary_ss_id);
+    int ss_id = file->ss_id;
+    int ss_index = find_storage_server(ss_id);
     StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
     
     printf("[DEBUG] Connecting to storage server: %s:%d (ss_id=%d)\n", 
-           ss->ip, ss->nm_port, primary_ss_id);
+           ss->ip, ss->nm_port, ss_id);
     int ss_socket = connect_to_server(ss->ip, ss->nm_port);
     if (ss_socket < 0) {
         printf("[DEBUG] Failed to connect to storage server!\n");
@@ -583,8 +535,8 @@ void handle_remaccess(int socket, Message *msg) {
     }
     
     // Forward to storage server
-    int primary_ss_id = file->primary_ss_id;
-    int ss_index = find_storage_server(primary_ss_id);
+    int ss_id = file->ss_id;
+    int ss_index = find_storage_server(ss_id);
     StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
     
     int ss_socket = connect_to_server(ss->ip, ss->nm_port);
@@ -746,12 +698,12 @@ void handle_info_request(int socket, Message *msg) {
     }
     
     // Get Storage Server info
-    int ss_index = find_storage_server(file->primary_ss_id);
+    int ss_index = find_storage_server(file->ss_id);
     if (ss_index < 0) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
         strcpy(response.data, "Storage server not available");
-        printf("[File Info] Storage server SS%d not found\n", file->primary_ss_id);
+        printf("[File Info] Storage server SS%d not found\n", file->ss_id);
         send_message(socket, &response);
         return;
     }
@@ -764,7 +716,7 @@ void handle_info_request(int socket, Message *msg) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to connect to storage server");
-        printf("[File Info] Failed to connect to SS%d\n", file->primary_ss_id);
+        printf("[File Info] Failed to connect to SS%d\n", file->ss_id);
         send_message(socket, &response);
         return;
     }
@@ -781,7 +733,7 @@ void handle_info_request(int socket, Message *msg) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
         strcpy(response.data, "Failed to request file info");
-        printf("[File Info] Failed to send INFO request to SS%d\n", file->primary_ss_id);
+        printf("[File Info] Failed to send INFO request to SS%d\n", file->ss_id);
         send_message(socket, &response);
         return;
     }
@@ -793,7 +745,7 @@ void handle_info_request(int socket, Message *msg) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
         strcpy(response.data, "Failed to receive file info");
-        printf("[File Info] Failed to receive response from SS%d\n", file->primary_ss_id);
+        printf("[File Info] Failed to receive response from SS%d\n", file->ss_id);
         send_message(socket, &response);
         return;
     }
@@ -863,7 +815,7 @@ void handle_view_files(int socket, Message *msg) {
                 
                 if (!is_owner) {
                     // Check if user has access to this file
-                    has_access = user_has_access(file->filename, msg->username, file->primary_ss_id);
+                    has_access = user_has_access(file->filename, msg->username, file->ss_id);
                 }
                 
                 // Skip files where user is NOT owner AND does NOT have access
@@ -877,7 +829,7 @@ void handle_view_files(int socket, Message *msg) {
             if (show_long) {
                 // Get detailed info from storage server
                 char details[512] = {0};
-                if (get_file_details(file->filename, file->primary_ss_id, details, sizeof(details)) == 0) {
+                if (get_file_details(file->filename, file->ss_id, details, sizeof(details)) == 0) {
                     // Parse details: "File: <name>\nOwner: <owner>\n...\nWords: <count>\nCharacters: <count>\nLast Accessed: <time>\n..."
                     int words = 0, chars = 0;
                     char last_access[64] = "N/A";
@@ -965,7 +917,7 @@ void handle_exec(int socket, Message *msg) {
     
     if (!is_owner) {
         // Check if user has access to this file
-        has_access = user_has_access(msg->filename, msg->username, file->primary_ss_id);
+        has_access = user_has_access(msg->filename, msg->username, file->ss_id);
     }
     
     if (!is_owner && !has_access) {
@@ -979,12 +931,12 @@ void handle_exec(int socket, Message *msg) {
     }
     
     // 3. Request file content from Storage Server
-    int ss_index = find_storage_server(file->primary_ss_id);
+    int ss_index = find_storage_server(file->ss_id);
     if (ss_index < 0) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
         strcpy(response.data, "Storage server not available");
-        printf("[File Exec] Storage server SS%d not found\n", file->primary_ss_id);
+        printf("[File Exec] Storage server SS%d not found\n", file->ss_id);
         send_message(socket, &response);
         return;
     }
@@ -998,7 +950,7 @@ void handle_exec(int socket, Message *msg) {
         response.error_code = ERR_CONNECTION_FAILED;
         strcpy(response.data, "Failed to connect to storage server");
         printf("[File Exec] Failed to connect to SS%d at %s:%d\n", 
-               file->primary_ss_id, ss->ip, ss->nm_port);
+               file->ss_id, ss->ip, ss->nm_port);
         send_message(socket, &response);
         return;
     }
@@ -1015,7 +967,7 @@ void handle_exec(int socket, Message *msg) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
         strcpy(response.data, "Failed to request file content");
-        printf("[File Exec] Failed to send EXEC request to SS%d\n", file->primary_ss_id);
+        printf("[File Exec] Failed to send EXEC request to SS%d\n", file->ss_id);
         send_message(socket, &response);
         return;
     }
@@ -1027,7 +979,7 @@ void handle_exec(int socket, Message *msg) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
         strcpy(response.data, "Failed to receive file content");
-        printf("[File Exec] Failed to receive response from SS%d\n", file->primary_ss_id);
+        printf("[File Exec] Failed to receive response from SS%d\n", file->ss_id);
         send_message(socket, &response);
         return;
     }
@@ -1038,7 +990,7 @@ void handle_exec(int socket, Message *msg) {
         response.msg_type = MSG_ERROR;
         response.error_code = ss_response.error_code;
         strcpy(response.data, ss_response.data);
-        printf("[File Exec] SS%d returned error: %d\n", file->primary_ss_id, ss_response.error_code);
+        printf("[File Exec] SS%d returned error: %d\n", file->ss_id, ss_response.error_code);
         send_message(socket, &response);
         return;
     }
@@ -1071,7 +1023,7 @@ void handle_exec(int socket, Message *msg) {
             response.msg_type = MSG_ERROR;
             response.error_code = ERR_SERVER_ERROR;
             strcpy(response.data, "Failed to receive file chunk");
-            printf("[File Exec] Failed to receive chunk from SS%d\n", file->primary_ss_id);
+            printf("[File Exec] Failed to receive chunk from SS%d\n", file->ss_id);
             send_message(socket, &response);
             return;
         }
@@ -1205,7 +1157,7 @@ void handle_createfolder(int socket, Message *msg) {
     }
     
     // Get available storage server
-    int ss_id = get_available_primary_server();
+    int ss_id = get_available_storage_server();
     if (ss_id < 0) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
@@ -1309,7 +1261,7 @@ void handle_move_file(int socket, Message *msg) {
     }
     
     // Get storage server
-    int ss_index = find_storage_server(file->primary_ss_id);
+    int ss_index = find_storage_server(file->ss_id);
     if (ss_index < 0) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
@@ -1411,7 +1363,7 @@ void handle_viewfolder(int socket, Message *msg) {
     }
     
     // Get storage server
-    int ss_index = find_storage_server(folder->primary_ss_id);
+    int ss_index = find_storage_server(folder->ss_id);
     if (ss_index < 0) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
@@ -1498,7 +1450,7 @@ void handle_checkpoint(int socket, Message *msg) {
     // In production, would check access control list
     
     // Get storage server
-    int ss_index = find_storage_server(file->primary_ss_id);
+    int ss_index = find_storage_server(file->ss_id);
     if (ss_index < 0) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
@@ -1581,7 +1533,7 @@ void handle_viewcheckpoint(int socket, Message *msg) {
     // Check read access (simplified)
     
     // Get storage server
-    int ss_index = find_storage_server(file->primary_ss_id);
+    int ss_index = find_storage_server(file->ss_id);
     if (ss_index < 0) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
@@ -1675,7 +1627,7 @@ void handle_revert(int socket, Message *msg) {
     }
     
     // Get storage server
-    int ss_index = find_storage_server(file->primary_ss_id);
+    int ss_index = find_storage_server(file->ss_id);
     if (ss_index < 0) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
@@ -1758,7 +1710,7 @@ void handle_listcheckpoints(int socket, Message *msg) {
     // Check read access (simplified)
     
     // Get storage server
-    int ss_index = find_storage_server(file->primary_ss_id);
+    int ss_index = find_storage_server(file->ss_id);
     if (ss_index < 0) {
         response.msg_type = MSG_ERROR;
         response.error_code = ERR_SERVER_ERROR;
@@ -2021,8 +1973,8 @@ void handle_approverequest(int socket, Message *msg) {
     // Call existing addaccess handler (but don't send response twice)
     FileInfo *file = find_file(filename);
     if (file) {
-        int primary_ss_id = file->primary_ss_id;
-        int ss_index = find_storage_server(primary_ss_id);
+        int ss_id = file->ss_id;
+        int ss_index = find_storage_server(ss_id);
         if (ss_index >= 0) {
             StorageServerInfo *ss = &nm_state->storage_servers[ss_index];
             int ss_socket = connect_to_server(ss->ip, ss->nm_port);

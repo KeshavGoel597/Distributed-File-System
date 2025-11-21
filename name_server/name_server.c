@@ -78,7 +78,7 @@ int init_name_server() {
     nm_state->ss_count = 0;
     nm_state->client_count = 0;
     nm_state->request_count = 0;
-    nm_state->next_primary_ss = 0;  // CRITICAL FIX: Start with index 0, not SS ID 1
+    nm_state->next_ss_index = 0;
     nm_state->running = 1;
     
     // Initialize hash table for efficient file search (O(1))
@@ -86,13 +86,6 @@ int init_name_server() {
     
     // Initialize file location cache for recent searches
     init_file_cache();
-    
-    // Initialize enhanced fault tolerance system
-    if (initialize_replication_system() < 0) {
-        printf("Error: Failed to initialize fault tolerance system\n");
-        cleanup_name_server();
-        return -1;
-    }
     
     // Create server socket
     nm_state->server_socket = create_socket();
@@ -124,15 +117,6 @@ int init_name_server() {
 
 void start_name_server() {
     printf("=== Starting Name Server ===\n");
-    
-    // Start heartbeat monitoring thread
-    pthread_t heartbeat_thread;
-    if (pthread_create(&heartbeat_thread, NULL, heartbeat_monitor, NULL) != 0) {
-        printf("Error: Failed to create heartbeat thread\n");
-        return;
-    }
-    pthread_detach(heartbeat_thread);
-    
     printf("Name Server is running...\n");
     print_server_status();
     
@@ -220,20 +204,6 @@ void handle_connection(void *arg) {
     switch (msg.operation) {
         case OP_SS_REGISTER:
             handle_storage_server_registration(socket, &msg);
-            break;
-            
-        case OP_RECOVERY_SYNC:
-            // Storage server completed recovery sync
-            printf("[Recovery Sync] SS%d completed recovery sync\n", msg.ss_id);
-            handle_recovery_sync_complete(msg.ss_id);
-            {
-                Message ack = {0};
-                ack.msg_type = MSG_ACK;
-                ack.operation = OP_RECOVERY_SYNC;
-                ack.error_code = ERR_SUCCESS;
-                strcpy(ack.data, "Recovery sync acknowledged");
-                send_message(socket, &ack);
-            }
             break;
             
         case OP_CLIENT_REGISTER:

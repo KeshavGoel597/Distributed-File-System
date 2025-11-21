@@ -40,24 +40,6 @@ void* handle_client_connection(void *arg) {
             handle_stream_request(client_sockfd, &request);
             break;
             
-        // Handle backup operations from primary server
-        case OP_BACKUP_CREATE:
-        case OP_BACKUP_DELETE:
-        case OP_BACKUP_SYNC:
-        case OP_BACKUP_INIT_SYNC:
-        case OP_BACKUP_METADATA:
-        case OP_BACKUP_FILE:
-        case OP_BACKUP_UNDO_FILE:
-        case OP_BACKUP_SYNC_COMPLETE:
-            // CRITICAL FIX: Only backup servers (not primary, not acting primary) should handle backup operations
-            if (!server_config.is_primary && !server_config.is_acting_primary) {
-                printf("[Client Handler] Received backup operation from primary\n");
-                handle_backup_request(client_sockfd);
-            } else {
-                fprintf(stderr, "[Client Handler] Cannot handle backup operation (this is a primary or acting-primary server)\n");
-            }
-            break;
-            
         case OP_UNDO: {
             printf("[UNDO] User '%s' undoing file: %s\n", request.username, request.filename);
             
@@ -80,12 +62,6 @@ void* handle_client_connection(void *arg) {
                 
                 // Update file statistics after UNDO
                 update_file_statistics_ll(request.filename);
-                
-                // Replicate restored file to backup server
-                if (server_config.is_primary || server_config.is_acting_primary) {
-                    enqueue_replication_task(REP_OP_SYNC, request.filename, NULL);
-                    printf("[UNDO] Enqueued async replication for '%s'\n", request.filename);
-                }
             }
             
             unlock_commit();
