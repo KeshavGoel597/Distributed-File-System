@@ -132,7 +132,6 @@ void message_to_network_order(Message *msg) {
     msg->port1 = htonl(msg->port1);
     msg->port2 = htonl(msg->port2);
     msg->ss_id = htonl(msg->ss_id);
-    msg->backup_port = htonl(msg->backup_port);
 }
 
 // Convert Message integer fields to host byte order (native) after receiving
@@ -147,7 +146,6 @@ void message_to_host_order(Message *msg) {
     msg->port1 = ntohl(msg->port1);
     msg->port2 = ntohl(msg->port2);
     msg->ss_id = ntohl(msg->ss_id);
-    msg->backup_port = ntohl(msg->backup_port);
 }
 
 // Send a Message structure over socket

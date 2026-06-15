@@ -225,7 +225,7 @@ static FileMetadata* find_metadata(const char *filename) {
 }
 
 // Create word node
-static WordNode* create_word_node(const char *word) {
+WordNode* create_word_node(const char *word) {
     WordNode *node = (WordNode*)malloc(sizeof(WordNode));
     if (node == NULL) return NULL;
     
@@ -236,7 +236,7 @@ static WordNode* create_word_node(const char *word) {
 }
 
 // Create sentence node
-static SentenceNode* create_sentence_node(char delimiter) {
+SentenceNode* create_sentence_node(char delimiter) {
     SentenceNode *node = (SentenceNode*)malloc(sizeof(SentenceNode));
     if (node == NULL) return NULL;
     
@@ -278,6 +278,7 @@ static int is_delimiter(char c) {
 static SentenceNode* parse_file_to_linked_list(const char *content) {
     SentenceNode *sentences_head = NULL;
     SentenceNode *current_sentence = NULL;
+    SentenceNode *last_sentence = NULL;
     WordNode *current_word = NULL;
     
     char word_buffer[256];
@@ -285,18 +286,21 @@ static SentenceNode* parse_file_to_linked_list(const char *content) {
     
     const char *p = content;
     
+    // For empty content, don't create any sentences
+    if (*p == '\0') {
+        return NULL;
+    }
+    
+    // Create first sentence only if content exists
+    current_sentence = create_sentence_node('\0');
+    if (current_sentence == NULL) return NULL;
+    sentences_head = current_sentence;
+    last_sentence = current_sentence;
+    
     while (*p) {
         // Skip leading whitespace
         while (*p && isspace(*p)) p++;
         if (!*p) break;
-        
-        // Create new sentence if needed
-        if (current_sentence == NULL) {
-            current_sentence = create_sentence_node('\0');
-            if (sentences_head == NULL) {
-                sentences_head = current_sentence;
-            }
-        }
         
         // Read word
         word_idx = 0;
@@ -336,9 +340,14 @@ static SentenceNode* parse_file_to_linked_list(const char *content) {
                 // End this sentence
                 current_sentence->delimiter = word_buffer[i];
                 
-                // Create new sentence for next part
+                // Create new sentence for next part (always, even if empty)
                 SentenceNode *new_sentence = create_sentence_node('\0');
-                current_sentence->next = new_sentence;
+                if (new_sentence == NULL) {
+                    free_sentence_list(sentences_head);
+                    return NULL;
+                }
+                last_sentence->next = new_sentence;
+                last_sentence = new_sentence;
                 current_sentence = new_sentence;
                 current_word = NULL;
                 
@@ -367,20 +376,26 @@ static SentenceNode* parse_file_to_linked_list(const char *content) {
         }
     }
     
-    // Remove trailing empty sentence if exists
-    if (current_sentence != NULL && current_sentence->words_head == NULL) {
-        if (sentences_head == current_sentence) {
-            // Only sentence and it's empty
-            free(current_sentence);
-            return NULL;
-        } else {
-            // Find previous sentence and remove last one
-            SentenceNode *prev = sentences_head;
-            while (prev->next != current_sentence) {
-                prev = prev->next;
-            }
+    // CRITICAL FIX: Remove trailing empty sentences ONLY if they have no delimiter
+    // This ensures proper indexing: "hi . HI" has 2 sentences, "hi . HI ." has 3 sentences
+    SentenceNode *prev = NULL;
+    SentenceNode *curr = sentences_head;
+    
+    // Find the last sentence
+    while (curr != NULL && curr->next != NULL) {
+        prev = curr;
+        curr = curr->next;
+    }
+    
+    // Remove last sentence only if it's empty AND has no delimiter
+    if (curr != NULL && curr->words_head == NULL && curr->delimiter == '\0') {
+        if (prev != NULL) {
             prev->next = NULL;
-            free(current_sentence);
+            free(curr);
+        } else {
+            // Only sentence is empty with no delimiter - this means empty file
+            free_sentence_list(sentences_head);
+            return NULL;
         }
     }
     
@@ -417,18 +432,17 @@ LoadedFile* load_file_into_memory(const char *filename) {
     fclose(fp);
     
     // Parse into linked list
-    SentenceNode *sentences = parse_file_to_linked_list(content);
+    SentenceNode *sentences = NULL;
+    if (file_size > 0) {
+        sentences = parse_file_to_linked_list(content);
+    }
     free(content);
     
-    // If file is empty, create one empty sentence for editing
+    // CRITICAL FIX: For empty files, don't create any sentences
+    // For non-empty files, the parser will create appropriate sentences including empty ones
+    // This allows proper indexing as per TinyOS specification
     if (sentences == NULL) {
-        sentences = create_sentence_node('\0');
-        if (sentences == NULL) {
-            return NULL;
-        }
-        // Create one empty word in the sentence
-        sentences->words_head = create_word_node("");
-        printf("Created initial empty sentence for empty file '%s'\n", filename);
+        printf("Loaded empty file '%s' - no sentences created\n", filename);
     }
     
     // Create LoadedFile structure
@@ -969,9 +983,19 @@ int lock_sentence_ll(const char *filename, int sentence_index, const char *usern
         return ERR_FILE_NOT_FOUND;
     }
     
-    // Validate sentence_index (must be non-negative and within range)
+    // Validate sentence_index (must be non-negative and within valid range for creation)
     if (sentence_index < 0) {
         printf("Lock FAILED: Negative sentence index %d for file '%s'\n", sentence_index, filename);
+        file_release(file);
+        return ERR_SENTENCE_OUT_OF_RANGE;
+    }
+    
+    // CRITICAL FIX: Allow locking next sentence index (for creating new sentences)
+    // This matches TinyOS behavior: sentence_index <= sentence_count is valid
+    if (sentence_index > file->sentence_count) {
+        printf("Lock FAILED: Sentence index %d out of range (0-%d) for file '%s'\n", 
+               sentence_index, file->sentence_count, filename);
+        file_release(file);
         return ERR_SENTENCE_OUT_OF_RANGE;
     }
     
@@ -984,8 +1008,15 @@ int lock_sentence_ll(const char *filename, int sentence_index, const char *usern
         current_index++;
     }
     
+    // sent will be NULL for new sentences (sentence_index == sentence_count)
+    // This is OK - we'll handle it differently
     if (sent == NULL) {
-        return ERR_SENTENCE_OUT_OF_RANGE;
+        // This is a new sentence (sentence_index == sentence_count)
+        // No actual locking needed yet - the write handler will create and lock it
+        printf("Allowing lock for new sentence %d in file '%s' for user '%s'\n", 
+               sentence_index, filename, username);
+        file_release(file);
+        return 0; // Success
     }
 
     int result = ERR_SENTENCE_LOCKED; // Default to locked
@@ -1014,6 +1045,7 @@ int lock_sentence_ll(const char *filename, int sentence_index, const char *usern
     // Unlock the mutex
     pthread_mutex_unlock(&sent->sentence_lock);
     
+    file_release(file);
     return result;
 }
 // Unlock a sentence (NEW VERSION)

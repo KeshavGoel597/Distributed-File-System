@@ -55,23 +55,10 @@
 #define OP_SS_DELETE_FILE 302   // NM instructs SS to delete file
 #define OP_STREAM_WORD 303      // SS sends individual word during streaming
 #define OP_STOP 304             // Signal to stop streaming or operation
-#define OP_NM_BACKUP_INFO 305   // NM sends backup server info to primary SS
 #define OP_SS_ADDACCESS 306     // NM instructs SS to add access permissions
 #define OP_SS_REMACCESS 307     // NM instructs SS to remove access permissions
 #define OP_READ_CHUNK 308       // SS sends file chunk during chunked READ
 #define OP_EXEC_CHUNK 309       // SS sends script chunk during chunked EXEC
-
-// Backup/Replication Operations
-#define OP_BACKUP_CREATE 400    // Primary SS instructs backup SS to create file
-#define OP_BACKUP_DELETE 401    // Primary SS instructs backup SS to delete file
-#define OP_BACKUP_SYNC 402      // Primary SS syncs file content to backup SS
-#define OP_BACKUP_REGISTER 403  // Backup SS registers with primary SS
-#define OP_BACKUP_METADATA 404  // Primary SS syncs metadata.txt to backup SS
-#define OP_BACKUP_INIT_SYNC 405 // Primary SS starts bulk sync to backup SS
-#define OP_BACKUP_FILE 406      // Primary SS sends a file during bulk sync
-#define OP_BACKUP_UNDO_FILE 407 // Primary SS sends an undo file during bulk sync
-#define OP_BACKUP_SYNC_COMPLETE 408 // Primary SS completes bulk sync
-#define OP_RECOVERY_SYNC 409    // NM instructs recovering primary to sync from backup
 
 // Error Codes
 #define ERR_SUCCESS 0
@@ -122,10 +109,8 @@ typedef struct {
     int port1;  // SS: port for NM connection | Client: port for NM connection
     int port2;  // SS: port for Client connection | Client: port for SS connection
 
-    // For Backup/Replication
-    int ss_id;          // Storage Server ID (1, 2, 3, 4, ...) for backup pairing
-    char backup_ip[MAX_IP_LEN];  // Backup server IP
-    int backup_port;    // Backup server port for replication
+    // For Storage Server ID
+    int ss_id;          // Storage Server ID (1, 2, 3, 4, ...)
 
     // For WRITE content, READ response, file lists, etc.
     char data[MAX_DATA_SIZE]; 

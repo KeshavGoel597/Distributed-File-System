@@ -57,31 +57,6 @@ int register_with_nm(int nm_port, int client_port, const char *ss_ip) {
     
     if (ack_msg.msg_type == MSG_ACK && ack_msg.error_code == ERR_SUCCESS) {
         printf("Registration acknowledged by Name Server\n");
-        
-        // If this is a primary server, wait for backup info
-        if (server_config.is_primary) {
-            printf("Waiting for backup info from Name Server...\n");
-            
-            Message backup_info;
-            if (receive_message(nm_sockfd, &backup_info) >= 0) {
-                if (backup_info.operation == OP_NM_BACKUP_INFO) {
-                    printf("Received backup info from NM\n");
-                    printf("Backup server: %s:%d\n", backup_info.backup_ip, backup_info.backup_port);
-                    
-                    // Handle backup info (connect and bulk sync)
-                    if (handle_nm_backup_info(backup_info.backup_ip, backup_info.backup_port) < 0) {
-                        fprintf(stderr, "Warning: Failed to setup backup connection\n");
-                    } else {
-                        printf("Successfully configured backup replication\n");
-                    }
-                } else {
-                    printf("No backup info available (backup server may not be online yet)\n");
-                }
-            } else {
-                printf("No backup info received (backup server may not be online yet)\n");
-            }
-        }
-        
         close_socket(nm_sockfd);
         return 0;
     } else {
@@ -133,12 +108,6 @@ void* handle_nm_connection(void *arg) {
                 // CRITICAL FIX: Save empty undo backup so first write can be undone
                 save_undo_backup_ll(request.filename);
                 printf("[NM Handler] Created initial UNDO backup for '%s'\n", request.filename);
-                
-                // Replicate to backup server asynchronously (non-blocking)
-                if (server_config.is_primary) {
-                    enqueue_replication_task(REP_OP_CREATE, request.filename, request.username);
-                    printf("[NM Handler] Enqueued async CREATE replication for '%s'\n", request.filename);
-                }
             }
             break;
         }
@@ -149,12 +118,6 @@ void* handle_nm_connection(void *arg) {
             int result = delete_file_ll(request.filename);
             if (result < 0) {
                 response.error_code = ERR_FILE_NOT_FOUND;
-            } else {
-                // Replicate to backup server asynchronously (non-blocking)
-                if (server_config.is_primary) {
-                    enqueue_replication_task(REP_OP_DELETE, request.filename, NULL);
-                    printf("[NM Handler] Enqueued async DELETE replication for '%s'\n", request.filename);
-                }
             }
             break;
         }
@@ -182,9 +145,9 @@ void* handle_nm_connection(void *arg) {
         case OP_EXEC: {
             printf("[NM Handler] EXEC request: %s\n", request.filename);
             
-            // Get full file path
-            char filepath[512];
-            snprintf(filepath, sizeof(filepath), "%s/%s", server_config.storage_dir, request.filename);
+            // Get full file path using the helper function (includes files/ subdirectory)
+            char filepath[MAX_PATH];
+            get_file_path(request.filename, filepath, MAX_PATH);
             
             // Open file directly
             FILE *file = fopen(filepath, "r");
@@ -280,12 +243,6 @@ void* handle_nm_connection(void *arg) {
             } else {
                 response.error_code = ERR_SUCCESS;
                 snprintf(response.data, MAX_DATA_SIZE, "Access granted successfully");
-                
-                // Replicate metadata to backup asynchronously
-                if (server_config.is_primary) {
-                    enqueue_replication_task(REP_OP_METADATA, "", NULL);
-                    printf("[NM Handler] Enqueued async metadata replication\n");
-                }
             }
             break;
         }
@@ -306,74 +263,6 @@ void* handle_nm_connection(void *arg) {
             } else {
                 response.error_code = ERR_SUCCESS;
                 snprintf(response.data, MAX_DATA_SIZE, "Access removed successfully");
-                
-                // Replicate metadata to backup asynchronously
-                if (server_config.is_primary) {
-                    enqueue_replication_task(REP_OP_METADATA, "", NULL);
-                    printf("[NM Handler] Enqueued async metadata replication\n");
-                }
-            }
-            break;
-        }
-        
-        case OP_NM_BACKUP_INFO: {
-            printf("[NM Handler] Received backup info from NM\n");
-            
-            // Extract backup server details from the correct fields
-            char backup_ip[MAX_IP_LEN];
-            int backup_port;
-            strncpy(backup_ip, request.backup_ip, MAX_IP_LEN - 1);
-            backup_port = request.backup_port;
-            
-            printf("[NM Handler] Backup server: %s:%d\n", backup_ip, backup_port);
-            
-            // Handle backup info (connect and bulk sync)
-            if (handle_nm_backup_info(backup_ip, backup_port) < 0) {
-                fprintf(stderr, "[NM Handler] ERROR: Failed to handle backup info\n");
-                response.error_code = ERR_CONNECTION_FAILED;
-            } else {
-                printf("[NM Handler] Successfully handled backup info\n");
-            }
-            break;
-        }
-        
-        case OP_RECOVERY_SYNC: {
-            // CRITICAL FIX: NM commanding this primary to sync from backup
-            printf("[Recovery Sync] Received recovery sync command from NM\n");
-            printf("[Recovery Sync] Backup server: %s:%d (SS%d)\n", 
-                   request.backup_ip, request.backup_port, request.ss_id);
-            
-            // Mark this server as syncing
-            server_config.is_acting_primary = 0;
-            
-            // Request full bulk sync from backup (which is currently acting primary)
-            if (request_recovery_sync_from_backup(request.backup_ip, request.backup_port) < 0) {
-                fprintf(stderr, "[Recovery Sync] ERROR: Failed to sync from backup\n");
-                response.error_code = ERR_SERVER_ERROR;
-                strcpy(response.data, "Recovery sync failed");
-            } else {
-                printf("[Recovery Sync] Successfully completed recovery sync from backup\n");
-                response.error_code = ERR_SUCCESS;
-                strcpy(response.data, "Recovery sync completed");
-                
-                // Notify Name Server that recovery is complete
-                int nm_sockfd = connect_to_server(server_config.nm_ip, NM_PORT);
-                if (nm_sockfd >= 0) {
-                    Message notify;
-                    memset(&notify, 0, sizeof(Message));
-                    notify.msg_type = MSG_REQUEST;
-                    notify.operation = OP_RECOVERY_SYNC;
-                    notify.ss_id = server_config.ss_id;
-                    strcpy(notify.data, "Recovery sync complete");
-                    
-                    send_message(nm_sockfd, &notify);
-                    
-                    Message nm_ack;
-                    receive_message(nm_sockfd, &nm_ack);
-                    close(nm_sockfd);
-                    
-                    printf("[Recovery Sync] Notified NM of recovery completion\n");
-                }
             }
             break;
         }
@@ -620,62 +509,6 @@ void* handle_nm_connection(void *arg) {
                     snprintf(response.data, MAX_DATA_SIZE, "No checkpoints found for this file");
                 }
                 response.error_code = ERR_SUCCESS;
-            }
-            break;
-        }
-        
-        case OP_BACKUP_INIT_SYNC: {
-            printf("[NM Handler] BACKUP_INIT_SYNC request from NM\n");
-            
-            // This is a request to perform bulk synchronization to backup server
-            // The backup server ID is in ss_id field
-            int target_ss_id = request.ss_id;
-            
-            if (server_config.is_primary && server_config.backup_sockfd > 0) {
-                printf("[Recovery] Starting bulk sync to backup SS%d\n", target_ss_id);
-                
-                // Send all files to backup server
-                if (perform_bulk_sync_to_backup() < 0) {
-                    response.error_code = ERR_SERVER_ERROR;
-                    strcpy(response.data, "Bulk sync failed");
-                } else {
-                    response.error_code = ERR_SUCCESS;
-                    strcpy(response.data, "Bulk sync completed successfully");
-                }
-            } else {
-                response.error_code = ERR_INVALID_OPERATION;
-                strcpy(response.data, "Not a primary server or backup not connected");
-            }
-            break;
-        }
-        
-        case OP_BACKUP_METADATA: {
-            printf("[NM Handler] BACKUP_METADATA request from NM\n");
-            
-            // This is a request to sync metadata to backup server
-            if (server_config.is_primary) {
-                // Enqueue metadata replication
-                enqueue_replication_task(REP_OP_METADATA, "", NULL);
-                response.error_code = ERR_SUCCESS;
-                strcpy(response.data, "Metadata sync initiated");
-            } else {
-                response.error_code = ERR_INVALID_OPERATION;
-                strcpy(response.data, "Not a primary server");
-            }
-            break;
-        }
-        
-        case OP_BACKUP_SYNC: {
-            printf("[NM Handler] BACKUP_SYNC request for file: %s\n", request.filename);
-            
-            // This is a request to sync a specific file to backup server
-            if (server_config.is_primary) {
-                enqueue_replication_task(REP_OP_SYNC, request.filename, NULL);
-                response.error_code = ERR_SUCCESS;
-                strcpy(response.data, "File sync initiated");
-            } else {
-                response.error_code = ERR_INVALID_OPERATION;
-                strcpy(response.data, "Not a primary server");
             }
             break;
         }

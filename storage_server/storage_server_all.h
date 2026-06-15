@@ -98,68 +98,22 @@ int remove_user_access_ll(const char *filename, const char *username);
 int get_file_list_ll(char *file_list, int max_size);
 int save_undo_backup_ll(const char *filename);
 int ensure_sentence_delimiter_ll(const char *filename, int sentence_index);
+
+// Helper functions for write operations
+WordNode* create_word_node(const char *word);
+SentenceNode* create_sentence_node(char delimiter);
+
+// Global commit lock functions
+void lock_commit(void);
+void unlock_commit(void);
+
 int load_metadata_ll();
 int save_metadata_ll();
 int add_metadata_ll(FileMetadata *metadata);
 void get_timestamp(char *buffer, size_t size);
 void cleanup_file_handler_ll();
 
-// ============================================================================
-// BACKUP HANDLER - from backup_handler.h
-// ============================================================================
 
-// Asynchronous Replication Queue Types
-#define REPLICATION_QUEUE_SIZE 1000
-
-typedef enum {
-    REP_OP_CREATE,
-    REP_OP_DELETE,
-    REP_OP_SYNC,
-    REP_OP_METADATA,
-    REP_OP_UNDO_BACKUP  // Replicate undo backup file
-} ReplicationOpType;
-
-typedef struct {
-    ReplicationOpType op_type;
-    char filename[MAX_FILENAME];
-    char owner[MAX_USERNAME];
-} ReplicationTask;
-
-typedef struct {
-    ReplicationTask tasks[REPLICATION_QUEUE_SIZE];
-    int head;
-    int tail;
-    int count;
-    pthread_mutex_t queue_mutex;
-    pthread_cond_t queue_not_empty;
-    pthread_cond_t queue_not_full;
-    int running;
-} ReplicationQueue;
-
-// Backup Handler Functions
-int init_backup_handler();
-int init_async_replication();
-void* async_replication_worker(void *arg);
-int enqueue_replication_task(ReplicationOpType op_type, const char *filename, const char *owner);
-int connect_to_backup_server(const char *backup_ip, int backup_port);
-int replicate_create(const char *filename, const char *owner);
-int replicate_delete(const char *filename);
-int replicate_sync(const char *filename);
-int replicate_undo_backup(const char *filename);
-int handle_backup_request(int sockfd);
-int send_file_to_backup(const char *filename);
-int send_undo_file_to_backup(const char *filename);
-int receive_file_from_primary(const char *filename, const char *owner);
-int receive_undo_file_from_primary(const char *filename);
-int is_backup_available();
-int handle_nm_backup_info(const char *backup_ip, int backup_port);
-int perform_bulk_sync();
-int perform_bulk_sync_to_backup();
-int request_recovery_sync_from_backup(const char *backup_ip, int backup_port);
-int replicate_metadata();
-int send_bulk_file(const char *filename, int is_undo_file);
-int receive_bulk_sync(int sockfd);
-void cleanup_backup_handler();
 
 // ============================================================================
 // STORAGE SERVER CLIENT COMMUNICATION - from ss_client_comm.h
@@ -193,22 +147,11 @@ typedef struct {
     char ss_ip[MAX_IP_LEN];      // Storage Server IP
     int nm_sockfd;         // Socket for NM connection
     int client_sockfd;     // Socket for client connections
-    
-    // Backup/Replication configuration
     int ss_id;             // Storage Server ID (1, 2, 3, ...)
-    int is_primary;        // 1 if odd (primary), 0 if even (backup)
-    int is_acting_primary; // 1 if backup is acting as primary (after failover)
-    char backup_ip[MAX_IP_LEN];  // Backup server IP
-    int backup_port;       // Backup server port for replication
-    int backup_sockfd;     // Socket for backup connection (-1 if not connected)
-    int bulk_sync_complete; // 1 if initial bulk sync is done
 } SSConfig;
 
 // Global server configuration
 extern SSConfig server_config;
-
-// Global replication queue for asynchronous backups
-extern ReplicationQueue replication_queue;
 
 // Thread argument structure
 typedef struct {
@@ -217,7 +160,7 @@ typedef struct {
 } ThreadArg;
 
 // Storage Server Main Functions
-int init_storage_server(int nm_port, int client_port, const char *storage_dir);
+int init_storage_server(int nm_port, int client_port, const char *storage_dir, const char *override_ip);
 int start_server();
 void* handle_nm_connections(void *arg);
 void* handle_client_connections(void *arg);

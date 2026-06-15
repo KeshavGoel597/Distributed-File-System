@@ -10,11 +10,16 @@
 #include <ifaddrs.h>
 #include <netdb.h>
 
+// Define constants if not already defined
+#ifndef NI_MAXHOST
+#define NI_MAXHOST 1025
+#endif
+#ifndef NI_NUMERICHOST
+#define NI_NUMERICHOST 1
+#endif
+
 // Global server configuration
 SSConfig server_config;
-
-// Global replication queue for asynchronous backups
-ReplicationQueue replication_queue;
 
 // Global flag to control server running state
 volatile sig_atomic_t server_running = 1;
@@ -66,15 +71,22 @@ int get_local_ip(char *ip_buffer, size_t buffer_size) {
 }
 
 // Initialize storage server
-int init_storage_server(int nm_port, int client_port, const char *storage_dir) {
+int init_storage_server(int nm_port, int client_port, const char *storage_dir, const char *override_ip) {
     server_config.nm_port = nm_port;
     server_config.client_port = client_port;
     strncpy(server_config.storage_dir, storage_dir, MAX_PATH - 1);
     
-    // CRITICAL FIX: Get actual network IP address instead of hardcoding 127.0.0.1
-    // This allows the server to work on different machines/containers
-    if (get_local_ip(server_config.ss_ip, MAX_IP_LEN) < 0) {
-        fprintf(stderr, "Warning: Could not detect IP address, using 127.0.0.1\n");
+    // CRITICAL FIX: Allow IP address override for cross-device setups
+    if (override_ip != NULL && strlen(override_ip) > 0) {
+        // Use provided IP address
+        strncpy(server_config.ss_ip, override_ip, MAX_IP_LEN - 1);
+        server_config.ss_ip[MAX_IP_LEN - 1] = '\0';
+        printf("[IP Override] Using provided IP: %s\n", server_config.ss_ip);
+    } else {
+        // Auto-detect IP address
+        if (get_local_ip(server_config.ss_ip, MAX_IP_LEN) < 0) {
+            fprintf(stderr, "Warning: Could not detect IP address, using 127.0.0.1\n");
+        }
     }
     
     printf("=== Storage Server Initialization ===\n");
@@ -92,18 +104,6 @@ int init_storage_server(int nm_port, int client_port, const char *storage_dir) {
     // Load existing metadata
     if (load_metadata_ll() < 0) {
         fprintf(stderr, "Warning: Could not load metadata (might be first run)\n");
-    }
-    
-    // Initialize backup handler
-    if (init_backup_handler() < 0) {
-        fprintf(stderr, "Warning: Could not initialize backup handler\n");
-    }
-    
-    // Initialize asynchronous replication (for primary servers)
-    if (server_config.is_primary) {
-        if (init_async_replication() < 0) {
-            fprintf(stderr, "Warning: Could not initialize async replication\n");
-        }
     }
     
     printf("Storage Server initialized successfully\n");
@@ -269,9 +269,6 @@ void shutdown_server() {
         server_config.client_sockfd = -1;
     }
     
-    // Cleanup backup handler
-    cleanup_backup_handler();
-    
     // Cleanup file handler (frees all in-memory structures)
     cleanup_file_handler_ll();
     
@@ -299,12 +296,14 @@ void signal_handler(int signum) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 6) {
-        fprintf(stderr, "Usage: %s <ss_id> <nm_ip> <nm_port> <client_port> <storage_dir>\n", argv[0]);
+    if (argc < 6 || argc > 7) {
+        fprintf(stderr, "Usage: %s <ss_id> <nm_ip> <nm_port> <client_port> <storage_dir> [ss_ip]\n", argv[0]);
         fprintf(stderr, "Example: %s 1 127.0.0.1 9001 9002 ./storage_data1\n", argv[0]);
         fprintf(stderr, "         %s 1 192.168.1.100 9001 9002 ./storage_data1  # For remote NM\n", argv[0]);
+        fprintf(stderr, "         %s 1 10.0.2.15 9001 9002 ./storage_data1 10.5.23.14  # Override SS IP\n", argv[0]);
         fprintf(stderr, "         SS_ID: 1=primary, 2=backup for SS1, 3=primary, 4=backup for SS3, ...\n");
         fprintf(stderr, "         NM_IP: IP address of Name Server (use 127.0.0.1 for localhost)\n");
+        fprintf(stderr, "         SS_IP: (Optional) Override auto-detected IP for this storage server\n");
         return 1;
     }
     
@@ -314,6 +313,7 @@ int main(int argc, char *argv[]) {
     int nm_port = atoi(argv[3]);
     int client_port = atoi(argv[4]);
     const char *storage_dir = argv[5];
+    const char *ss_ip_override = (argc == 7) ? argv[6] : NULL;  // Optional SS IP override
     
     // Validate ss_id
     if (ss_id <= 0 || ss_id > 100) {
@@ -355,17 +355,13 @@ int main(int argc, char *argv[]) {
     
     // Determine if this is a primary or backup server
     server_config.ss_id = ss_id;
-    server_config.is_primary = (ss_id % 2 == 1);  // Odd = primary, Even = backup
-    server_config.is_acting_primary = 0;  // Initially false
-    server_config.backup_sockfd = -1;     // Not connected yet
-    server_config.bulk_sync_complete = 0; // No sync yet
     
     // Register signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
     // Initialize server
-    if (init_storage_server(nm_port, client_port, storage_dir) < 0) {
+    if (init_storage_server(nm_port, client_port, storage_dir, ss_ip_override) < 0) {
         fprintf(stderr, "Failed to initialize storage server\n");
         return 1;
     }

@@ -1,9 +1,2 @@
-/.specstory
-storage_data*
-*.o
-storage_server/storage_server
-name_server/name_server
-client/client
-*.log
-*.sh
-*.fish
+*.md
+*.txt
